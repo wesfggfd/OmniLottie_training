@@ -319,7 +319,7 @@ Generate a valid Lottie animation.
 输入可包含：
 
 - 文本描述
-- 图像
+- 文本-图像
 - 视频
 
 目标可来自：
@@ -457,7 +457,7 @@ accelerate launch train.py \
 - 数据适配：使用 parquet + 字段候选映射支持更灵活的数据组织
 - 微调方式：采用 LoRA，而不是默认沿用原始官方训练配置
 
-如果你在报告、项目页或论文中使用本仓库，建议明确说明：
+说明：
 
 1. 原始方法灵感来自 OmniLottie；
 2. 当前实现对 backbone 与训练流程进行了重新设计。
@@ -473,8 +473,7 @@ accelerate launch train.py \
 - `app.py`
 - `app_hf.py`
 
-不过本 README 主要针对 **Qwen3.5-9B 训练版本**。如果后续你对推理接口或权重导出方式进行了修改，建议另行补充推理文档。
-
+本 README 主要针对 **Qwen3.5-9B 训练版本**。
 ---
 
 ## Training Notes
@@ -521,6 +520,3 @@ accelerate launch train.py \
   year={2026}
 }
 ```
-
-如果你后续公开自己的模型、数据或实验结果，建议在此基础上补充你自己的引用信息。
-
