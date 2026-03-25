@@ -8,8 +8,7 @@ from typing import Any, Dict, Iterable, List
 import pyarrow.parquet as pq
 
 from data.lottie_dataset import LottieFieldMap
-from tokenizer.hybrid_lottie_tokenizer import HybridLottieTokenizer
-from tokenizer.json_sequence_encoder import animation_to_sequence_text
+from lottie.objects.lottie_rule_tokenizer import LottieRuleTokenizer
 
 
 def collect_parquet_files(dataset_root: Path) -> List[Path]:
@@ -58,7 +57,7 @@ def main() -> None:
     if chosen_sample is None:
         raise IndexError(f"No eligible sample found at valid sample index {args.sample_index}")
 
-    tokenizer = HybridLottieTokenizer(args.model_path)
+    tokenizer = LottieRuleTokenizer(args.model_path)
 
     sequence_value = first_present(chosen_sample, field_map.sequence_candidates)
     if sequence_value:
@@ -69,8 +68,8 @@ def main() -> None:
         source_mode = "json"
         json_value = first_present(chosen_sample, field_map.json_candidates)
         parsed = json.loads(json_value) if isinstance(json_value, str) else json_value
-        sequence_text = animation_to_sequence_text(parsed)
         token_ids = tokenizer.encode_lottie_json(parsed, max_length=args.max_length)
+        sequence_text = tokenizer.token_ids_to_sequence(token_ids)
 
     recovered_sequence = tokenizer.token_ids_to_sequence(token_ids)
     recovered_animation = tokenizer.token_ids_to_lottie_json(token_ids)

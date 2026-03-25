@@ -2,15 +2,22 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Dict, List, Sequence
 
 from transformers import AutoConfig, AutoTokenizer
 
 from lottie.objects.animation import Animation
 from lottie.objects.lottie_param import from_sequence
 from lottie.objects.lottie_tokenize import LottieTensor
-from tokenizer.offset_vocab import LottieVocabLayout
 
+
+ORIGINAL_BASE_VOCAB_SIZE = 151643
+ORIGINAL_VOCAB_SIZE = 192400
+ORIGINAL_COMMAND_OFFSET = 151936
+ORIGINAL_NUMBER_OFFSET = 173186
+ORIGINAL_PAD_TOKEN_ID = 151643
+ORIGINAL_BOS_TOKEN_ID = 192398
+ORIGINAL_EOS_TOKEN_ID = 192399
 
 SUPPORTED_LAYER_TYPES = {0, 1, 3, 4, 5}
 
@@ -20,6 +27,67 @@ class TokenGroupSpec:
     count_index: int
     start_index: int
     max_tokens: int
+
+
+@dataclass(frozen=True)
+class LottieVocabLayout:
+    base_vocab_size: int
+
+    @property
+    def lottie_vocab_size(self) -> int:
+        return ORIGINAL_VOCAB_SIZE - ORIGINAL_BASE_VOCAB_SIZE
+
+    @property
+    def vocab_size(self) -> int:
+        return self.base_vocab_size + self.lottie_vocab_size
+
+    @property
+    def shift(self) -> int:
+        return self.base_vocab_size - ORIGINAL_BASE_VOCAB_SIZE
+
+    @property
+    def command_offset(self) -> int:
+        return ORIGINAL_COMMAND_OFFSET + self.shift
+
+    @property
+    def number_offset(self) -> int:
+        return ORIGINAL_NUMBER_OFFSET + self.shift
+
+    @property
+    def pad_token_id(self) -> int:
+        return ORIGINAL_PAD_TOKEN_ID + self.shift
+
+    @property
+    def bos_token_id(self) -> int:
+        return ORIGINAL_BOS_TOKEN_ID + self.shift
+
+    @property
+    def eos_token_id(self) -> int:
+        return ORIGINAL_EOS_TOKEN_ID + self.shift
+
+    @property
+    def lottie_token_start(self) -> int:
+        return ORIGINAL_BASE_VOCAB_SIZE + self.shift
+
+    @property
+    def lottie_token_end(self) -> int:
+        return ORIGINAL_VOCAB_SIZE - 1 + self.shift
+
+    @property
+    def num_commands(self) -> int:
+        return len(LottieTensor.COMMANDS)
+
+    def command_token_id(self, command_idx: int) -> int:
+        return self.command_offset + command_idx
+
+    def count_token_id(self, count: int) -> int:
+        return self.number_offset + count
+
+    def remap_param_offset(self, command_idx: int, param_idx: int) -> int:
+        original_offset = LottieTensor.get_param_offset(command_idx, param_idx)
+        if original_offset == 0:
+            return 0
+        return original_offset + self.shift
 
 
 class LottieSchemaFilter:
@@ -41,7 +109,7 @@ class LottieSchemaFilter:
         return all(layer.get("ty") in SUPPORTED_LAYER_TYPES for layer in asset.get("layers", []))
 
 
-class HybridLottieTokenizer:
+class LottieRuleTokenizer:
     def __init__(self, base_model_name: str = "Qwen/Qwen3.5-9B"):
         self.base_model_name = base_model_name
         self.base_tokenizer = AutoTokenizer.from_pretrained(base_model_name, trust_remote_code=True)
@@ -129,44 +197,6 @@ class HybridLottieTokenizer:
             return self.encode_sequence_text(filtered["sequence_text"], max_length=max_length)
         normalized = Animation.load(filtered).to_dict()
         return self._encode_animation_dict(normalized, max_length=max_length)
-
-    def flatten_tensor(self, lottie_tensor: LottieTensor, max_length: int | None = None) -> List[int]:
-        commands = lottie_tensor.commands.reshape(-1).tolist()
-        params = lottie_tensor.params.tolist()
-        tokenizer_specs = self.tokenizer_command_specs()
-
-        flattened: List[int] = []
-        for command_idx, param_row in zip(commands, params):
-            flattened.append(self.vocab.command_token_id(command_idx))
-
-            if command_idx in tokenizer_specs:
-                spec = tokenizer_specs[command_idx]
-                for param_idx in spec["regular"]:
-                    value = param_row[param_idx]
-                    if value == LottieTensor.PAD_VAL:
-                        continue
-                    flattened.append(self._encode_numeric(command_idx, param_idx, value))
-
-                for group in spec["token_groups"]:
-                    count = int(param_row[group.count_index]) if param_row[group.count_index] != LottieTensor.PAD_VAL else 0
-                    count = max(0, min(count, group.max_tokens))
-                    flattened.append(self.vocab.count_token_id(count))
-                    for i in range(count):
-                        token_value = int(param_row[group.start_index + i])
-                        if token_value == LottieTensor.PAD_VAL:
-                            break
-                        flattened.append(token_value)
-            else:
-                for param_idx in LottieTensor.get_command_param_indices(command_idx):
-                    value = param_row[param_idx]
-                    if value == LottieTensor.PAD_VAL:
-                        continue
-                    flattened.append(self._encode_numeric(command_idx, param_idx, value))
-
-            if max_length is not None and len(flattened) >= max_length:
-                return flattened[:max_length]
-
-        return flattened
 
     def decode_token_ids(self, token_ids: Sequence[int]) -> LottieTensor:
         LottieTensor.init_tokenizer(self.base_model_name)
@@ -739,4 +769,3 @@ class HybridLottieTokenizer:
             if len(hex_value) == 8:
                 return [int(hex_value[i : i + 2], 16) for i in (0, 2, 4, 6)]
         return [0, 0, 0, 255]
-
