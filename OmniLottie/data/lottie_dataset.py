@@ -12,7 +12,7 @@ import torch
 from torch.utils.data import Dataset
 from qwen_vl_utils import process_vision_info
 
-from tokenizer.hybrid_lottie_tokenizer import HybridLottieTokenizer
+from lottie.objects.lottie_rule_tokenizer import LottieRuleTokenizer
 
 
 def _first_present(sample: Dict[str, Any], candidates: Iterable[str]) -> Any:
@@ -48,7 +48,7 @@ class MMLottieAutoregressiveDataset(Dataset):
         self,
         rows: List[Dict[str, Any]],
         processor,
-        lottie_tokenizer: HybridLottieTokenizer,
+        lottie_tokenizer: LottieRuleTokenizer,
         field_map: Optional[LottieFieldMap] = None,
         system_prompt: str = "Generate a valid Lottie animation.",
         max_seq_len: int = 4096,

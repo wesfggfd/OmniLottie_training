@@ -18,7 +18,7 @@ from transformers import AutoProcessor, get_cosine_schedule_with_warmup
 from data.collator import LottieDataCollator
 from data.lottie_dataset import LottieFieldMap, MMLottieAutoregressiveDataset
 from decoder import LottieDecoder
-from tokenizer.hybrid_lottie_tokenizer import HybridLottieTokenizer
+from lottie.objects.lottie_rule_tokenizer import LottieRuleTokenizer
 
 
 def build_optimizer(
@@ -187,7 +187,7 @@ def main() -> None:
     log_path = output_dir / "train_log.jsonl"
 
     processor = AutoProcessor.from_pretrained(args.model_path, trust_remote_code=True, padding_side="left")
-    lottie_tokenizer = HybridLottieTokenizer(args.model_path)
+    lottie_tokenizer = LottieRuleTokenizer(args.model_path)
     model = LottieDecoder(
         pix_len=4560,
         text_len=1500,

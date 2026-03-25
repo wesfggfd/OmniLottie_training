@@ -22,7 +22,7 @@ from lottie.objects.lottie_param import (
     shape_layer_to_json, null_layer_to_json, precomp_layer_to_json,
     text_layer_to_json, solid_layer_to_json, font_to_json, char_to_json
 )
-from tokenizer.offset_vocab import LottieVocabLayout
+from lottie.objects.lottie_rule_tokenizer import LottieVocabLayout
 
 SYSTEM_PROMPT = "You are a Lottie animation expert."
 VIDEO_PROMPT = "Turn this video into Lottie code."

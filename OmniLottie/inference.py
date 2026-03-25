@@ -33,7 +33,7 @@ from lottie.objects.lottie_param import (
 )
 
 from PIL import Image as PILImage
-from tokenizer.offset_vocab import LottieVocabLayout
+from lottie.objects.lottie_rule_tokenizer import LottieVocabLayout
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 torch.backends.cudnn.benchmark = False

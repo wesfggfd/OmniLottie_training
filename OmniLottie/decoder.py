@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from transformers import AutoConfig, Qwen3_5ForConditionalGeneration
 
-from tokenizer.offset_vocab import LottieVocabLayout
+from lottie.objects.lottie_rule_tokenizer import LottieVocabLayout
 
 
 class LottieDecoder(nn.Module):
