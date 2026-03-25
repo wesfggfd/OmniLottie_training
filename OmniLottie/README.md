@@ -98,8 +98,8 @@ parser.add_argument("--model_path", type=str, default="Qwen/Qwen3.5-9B")
 ### 1. Clone
 
 ```bash
-git clone <your-repo-url>
-cd OmniLottie
+git clone https://github.com/wesfggfd/OmniLottie_training.git
+cd OmniLottie_training/OmniLottie
 ```
 
 ### 2. Create Environment
@@ -349,6 +349,8 @@ output_dir/
 ├── final/
 ├── checkpoint-xxxx/
 └── latest_checkpoint.txt
+
+> 推荐将训练输出写到仓库外部目录，或确保这些目录被 `.gitignore` 忽略，避免将 checkpoint 和日志提交到代码仓库。
 ```
 
 说明：
@@ -472,6 +474,14 @@ accelerate launch train.py \
 - `app_hf.py`
 
 不过本 README 主要针对 **Qwen3.5-9B 训练版本**。如果后续你对推理接口或权重导出方式进行了修改，建议另行补充推理文档。
+
+---
+
+## Training Notes
+
+- 建议不要将 `datasets/`、`models/`、`outputs/`、checkpoint 文件和日志直接提交到仓库。
+- 若需复现实验，请优先记录数据来源、训练参数、模型版本和输出路径。
+- 如果训练输出目录放在仓库内部，请确认根目录 `.gitignore` 已生效。
 
 ---
 
