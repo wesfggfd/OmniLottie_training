@@ -6,7 +6,7 @@ supporting automatic downloading from Hugging Face Hub.
 
 Environment Variables:
     MODEL_PATH: Model path or HF Hub ID (default: "OmniLottie/OmniLottie")
-    PROCESSOR_PATH: Processor path (default: "Qwen/Qwen2.5-VL-3B-Instruct")
+    PROCESSOR_PATH: Processor path (default: model.config.base_model_path)
 
 Usage:
     # Using HF Hub model (automatic download)
@@ -33,12 +33,12 @@ import time
 from PIL import Image as PILImage
 from decord import VideoReader, cpu
 
-from decoder_hf import LottieDecoder  # Use HF decoder with from_pretrained
+from decoder_hf import LottieDecoder  # Compatibility wrapper around Qwen3.5 model
 from transformers import AutoProcessor
 from qwen_vl_utils import process_vision_info
-from lottie.objects.lottie_tokenize import LottieTensor
+from tokenizer.hybrid_lottie_tokenizer import HybridLottieTokenizer
 from lottie.objects.lottie_param import (
-    from_sequence, ShapeLayer, NullLayer, PreCompLayer, TextLayer,
+    ShapeLayer, NullLayer, PreCompLayer, TextLayer,
     SolidColorLayer, Font, Chars,
     shape_layer_to_json, null_layer_to_json, precomp_layer_to_json,
     text_layer_to_json, solid_layer_to_json, font_to_json, char_to_json
@@ -46,13 +46,11 @@ from lottie.objects.lottie_param import (
 
 SYSTEM_PROMPT = "You are a Lottie animation expert."
 VIDEO_PROMPT = "Turn this video into Lottie code."
-LOTTIE_BOS = 192398
-LOTTIE_EOS = 192399
-PAD_TOKEN = 151643
 
 model = None
 processor = None
 device = None
+lottie_tokenizer = None
 
 generation_lock = threading.Lock()
 
@@ -61,10 +59,10 @@ def load_model_once():
     Load OmniLottie model using from_pretrained() for HuggingFace compatibility
     Supports automatic downloading from HF Hub or loading from local path
     """
-    global model, processor, device
+    global model, processor, device, lottie_tokenizer
 
     if model is not None:
-        return model, processor, device
+        return model, processor, device, lottie_tokenizer
 
     # Model path - can be HF Hub ID or local path
     # Examples: "OmniLottie/OmniLottie" or "/path/to/local/model"
@@ -84,16 +82,17 @@ def load_model_once():
     model = model.to(device).eval()
 
     # Load processor
-    processor_path = os.environ.get("PROCESSOR_PATH", "Qwen/Qwen2.5-VL-3B-Instruct")
+    processor_path = os.environ.get("PROCESSOR_PATH", model.config.base_model_path)
     processor = AutoProcessor.from_pretrained(
         processor_path,
         padding_side="left",
         trust_remote_code=True
     )
+    lottie_tokenizer = HybridLottieTokenizer(model.config.base_model_path)
 
     print(f"✅ Model loaded on {device}")
 
-    return model, processor, device
+    return model, processor, device, lottie_tokenizer
 
 def simplify_to_animation_description(text):
     if not text or not isinstance(text, str):
@@ -206,7 +205,7 @@ def build_messages(task_type, text_prompt=None, image=None, video_frames=None):
 
     return messages
 
-def prepare_inference_input(processor, messages, device):
+def prepare_inference_input(processor, messages, device, pad_token_id):
     text_input = processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
@@ -228,7 +227,7 @@ def prepare_inference_input(processor, messages, device):
     if input_ids.shape[1] < target_len:
         pad_len = target_len - input_ids.shape[1]
         input_ids = torch.cat([
-            torch.full((1, pad_len), PAD_TOKEN, dtype=torch.long),
+            torch.full((1, pad_len), pad_token_id, dtype=torch.long),
             input_ids
         ], dim=1)
         attention_mask = torch.cat([
@@ -247,7 +246,19 @@ def prepare_inference_input(processor, messages, device):
 
     return result
 
-def generate_lottie(model, inputs, max_tokens, device, use_sampling=False, temperature=0.95, top_p=0.25, top_k=5):
+def generate_lottie(
+    model,
+    inputs,
+    max_tokens,
+    device,
+    bos_token_id,
+    eos_token_id,
+    pad_token_id,
+    use_sampling=False,
+    temperature=0.95,
+    top_p=0.25,
+    top_k=5,
+):
     """生成 Lottie tokens"""
     model.transformer.rope_deltas = None
     position_ids, _ = model.transformer.get_rope_index(
@@ -267,8 +278,8 @@ def generate_lottie(model, inputs, max_tokens, device, use_sampling=False, tempe
         'video_grid_thw': inputs.get('video_grid_thw'),
         'position_ids': position_ids,
         'max_new_tokens': max_tokens,
-        'eos_token_id': LOTTIE_EOS,
-        'pad_token_id': PAD_TOKEN,
+        'eos_token_id': eos_token_id,
+        'pad_token_id': pad_token_id,
         'use_cache': True,
     }
 
@@ -285,10 +296,10 @@ def generate_lottie(model, inputs, max_tokens, device, use_sampling=False, tempe
 
     del outputs, kwargs, position_ids
 
-    if generated_ids and generated_ids[0] == LOTTIE_BOS:
+    if generated_ids and generated_ids[0] == bos_token_id:
         generated_ids = generated_ids[1:]
-    if LOTTIE_EOS in generated_ids:
-        generated_ids = generated_ids[:generated_ids.index(LOTTIE_EOS)]
+    if eos_token_id in generated_ids:
+        generated_ids = generated_ids[:generated_ids.index(eos_token_id)]
 
     return generated_ids
 
@@ -417,10 +428,8 @@ def fix_lottie_json(anim):
 
     return anim
 
-def tokens_to_lottie_json(generated_ids):
-    reconstructed_tensor = LottieTensor.from_list(generated_ids)
-    reconstructed_sequence = reconstructed_tensor.to_sequence()
-    reconstructed = from_sequence(reconstructed_sequence)
+def tokens_to_lottie_json(generated_ids, lottie_tokenizer):
+    reconstructed = lottie_tokenizer.token_ids_to_lottie_json(generated_ids)
 
     json_animation = {
         "v": reconstructed.get("v", "5.5.2"),
@@ -616,13 +625,16 @@ def process_text_to_lottie(text_prompt, max_tokens, use_sampling, temperature, t
 
             if not text_prompt or not text_prompt.strip():
                 return None, "❌ Please enter a text description", None
-            model, processor, device = load_model_once()
+            model, processor, device, lottie_tokenizer = load_model_once()
 
             messages = build_messages("text", text_prompt=text_prompt)
-            inputs = prepare_inference_input(processor, messages, device)
+            inputs = prepare_inference_input(processor, messages, device, lottie_tokenizer.pad_token_id)
 
             generated_ids = generate_lottie(
                 model, inputs, max_tokens, device,
+                lottie_tokenizer.bos_token_id,
+                lottie_tokenizer.eos_token_id,
+                lottie_tokenizer.pad_token_id,
                 use_sampling, temperature, top_p, top_k
             )
 
@@ -632,7 +644,7 @@ def process_text_to_lottie(text_prompt, max_tokens, use_sampling, temperature, t
             if torch.xpu.is_available():
                 torch.xpu.empty_cache()
 
-            lottie_json = tokens_to_lottie_json(generated_ids)
+            lottie_json = tokens_to_lottie_json(generated_ids, lottie_tokenizer)
 
             html = create_lottie_html(lottie_json, height=600)
 
@@ -679,7 +691,7 @@ def process_image_to_lottie(image_file, text_description, max_tokens, use_sampli
             if image_file is None:
                 return None, "❌ Please upload an image", None
 
-            model, processor, device = load_model_once()
+            model, processor, device, lottie_tokenizer = load_model_once()
 
             image = load_image_from_file(image_file)
 
@@ -687,10 +699,13 @@ def process_image_to_lottie(image_file, text_description, max_tokens, use_sampli
 
             desc = text_description if text_description else "A simple animation"
             messages = build_messages("image", text_prompt=desc, image=image)
-            inputs = prepare_inference_input(processor, messages, device)
+            inputs = prepare_inference_input(processor, messages, device, lottie_tokenizer.pad_token_id)
 
             generated_ids = generate_lottie(
                 model, inputs, max_tokens, device,
+                lottie_tokenizer.bos_token_id,
+                lottie_tokenizer.eos_token_id,
+                lottie_tokenizer.pad_token_id,
                 use_sampling, temperature, top_p, top_k
             )
 
@@ -700,7 +715,7 @@ def process_image_to_lottie(image_file, text_description, max_tokens, use_sampli
             if torch.xpu.is_available():
                 torch.xpu.empty_cache()
 
-            lottie_json = tokens_to_lottie_json(generated_ids)
+            lottie_json = tokens_to_lottie_json(generated_ids, lottie_tokenizer)
 
             html = create_lottie_html(lottie_json, height=600)
 
@@ -732,15 +747,18 @@ def process_video_to_lottie(video, max_tokens, use_sampling, temperature, top_p,
             if ext not in ('.mp4', '.avi', '.mov', '.gif', '.webp'):
                 return None, f"❌ Unsupported format: {ext}. Please upload MP4/AVI/MOV/GIF/WebP", None
 
-            model, processor, device = load_model_once()
+            model, processor, device, lottie_tokenizer = load_model_once()
 
             frames = load_frames_from_video(video, num_frames=8)
 
             messages = build_messages("video", video_frames=frames)
-            inputs = prepare_inference_input(processor, messages, device)
+            inputs = prepare_inference_input(processor, messages, device, lottie_tokenizer.pad_token_id)
 
             generated_ids = generate_lottie(
                 model, inputs, max_tokens, device,
+                lottie_tokenizer.bos_token_id,
+                lottie_tokenizer.eos_token_id,
+                lottie_tokenizer.pad_token_id,
                 use_sampling, temperature, top_p, top_k
             )
 
@@ -750,7 +768,7 @@ def process_video_to_lottie(video, max_tokens, use_sampling, temperature, top_p,
             if torch.xpu.is_available():
                 torch.xpu.empty_cache()
 
-            lottie_json = tokens_to_lottie_json(generated_ids)
+            lottie_json = tokens_to_lottie_json(generated_ids, lottie_tokenizer)
 
             html = create_lottie_html(lottie_json, height=600)
 

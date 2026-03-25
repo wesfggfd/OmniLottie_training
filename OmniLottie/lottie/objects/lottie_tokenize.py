@@ -9,6 +9,13 @@ import numpy as np
 class LottieTensor:
     # Command type constants (添加新的命令常量)
     tokenizer = None
+    tokenizer_name = None
+    ORIGINAL_BASE_VOCAB_SIZE = 151643
+    ORIGINAL_VOCAB_SIZE = 192400
+    ORIGINAL_PAD_TOKEN_ID = 151643
+    ORIGINAL_BOS_TOKEN_ID = 192398
+    ORIGINAL_EOS_TOKEN_ID = 192399
+    DEFAULT_TOKENIZER_PATH = "Qwen/Qwen3.5-9B"
     CMD_ANIMATION = 0 
     CMD_LAYER = 1 
     CMD_TRANSFORM = 2 
@@ -3719,16 +3726,19 @@ class LottieTensor:
     @classmethod
     def init_tokenizer(cls, model_path=None):
         """Initialize tokenizer once for the class - 支持多路径fallback"""
-        if cls.tokenizer is None:
+        target_path = model_path or cls.DEFAULT_TOKENIZER_PATH
+        if cls.tokenizer is None or cls.tokenizer_name != target_path:
             from transformers import AutoTokenizer
             if model_path is None:
                 # 尝试多个可能的路径
                 possible_paths = [
-                    'Qwen/Qwen2.5-VL-3B-Instruct',  # HuggingFace Hub
+                    cls.DEFAULT_TOKENIZER_PATH,
                 ]
                 for path in possible_paths:
                     try:
                         cls.tokenizer = AutoTokenizer.from_pretrained(path)
+                        cls.tokenizer_name = path
+                        cls._OFFSET_CACHE.clear()
                         # 只在主进程打印一次
                         import os
                         if os.environ.get('RANK', '0') == '0':
@@ -3739,13 +3749,37 @@ class LottieTensor:
                 raise ValueError(f"Failed to load tokenizer from any known path: {possible_paths}")
             else:
                 cls.tokenizer = AutoTokenizer.from_pretrained(model_path)
+                cls.tokenizer_name = model_path
+                cls._OFFSET_CACHE.clear()
     
     @classmethod
     def get_tokenizer(cls):
         if cls.tokenizer is None:
-            from transformers import AutoTokenizer
-            cls.tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-VL-3B-Instruct')
+            cls.init_tokenizer(cls.DEFAULT_TOKENIZER_PATH)
         return cls.tokenizer
+
+    @classmethod
+    def get_token_id_shift(cls) -> int:
+        tokenizer = cls.get_tokenizer()
+        base_vocab_size = getattr(tokenizer, "vocab_size", len(tokenizer))
+        return base_vocab_size - cls.ORIGINAL_BASE_VOCAB_SIZE
+
+    @classmethod
+    def restore_opensource_token_id(cls, token_id: int) -> int:
+        shift = cls.get_token_id_shift()
+        if shift == 0:
+            return token_id
+        if token_id == cls.ORIGINAL_PAD_TOKEN_ID + shift:
+            return cls.ORIGINAL_PAD_TOKEN_ID
+        if token_id == cls.ORIGINAL_BOS_TOKEN_ID + shift:
+            return cls.ORIGINAL_BOS_TOKEN_ID
+        if token_id == cls.ORIGINAL_EOS_TOKEN_ID + shift:
+            return cls.ORIGINAL_EOS_TOKEN_ID
+        shifted_start = cls.ORIGINAL_BASE_VOCAB_SIZE + shift
+        shifted_end = cls.ORIGINAL_VOCAB_SIZE + shift
+        if shifted_start <= token_id < shifted_end:
+            return token_id - shift
+        return token_id
     
 
     @staticmethod
@@ -5977,6 +6011,8 @@ class LottieTensor:
                 LottieTensor.init_tokenizer()
             except Exception as e:
                 print(f"Warning: Failed to initialize tokenizer in from_list: {e}")
+
+        flattened = [LottieTensor.restore_opensource_token_id(int(token)) for token in flattened]
 
         COMMAND_OFFSET = 151936
         NUMBER_OFFSET = 173186

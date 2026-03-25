@@ -84,43 +84,20 @@ class MMLottieAutoregressiveDataset(Dataset):
             add_generation_prompt=True,
         )
         image_inputs, video_inputs = process_vision_info(messages)
-
-        if video_inputs:
-            processor_outputs = self.processor(
-                text=[text_input],
-                images=None,
-                videos=video_inputs,
-                padding=False,
-                truncation=False,
-                return_tensors="pt",
-            )
-        elif image_inputs:
-            processor_outputs = self.processor(
-                text=[text_input],
-                images=image_inputs,
-                videos=None,
-                padding=False,
-                truncation=False,
-                return_tensors="pt",
-            )
-        else:
-            processor_outputs = self.processor(
-                text=[text_input],
-                images=None,
-                videos=None,
-                padding=False,
-                truncation=False,
-                return_tensors="pt",
-            )
+        processor_outputs = self.processor(
+            text=[text_input],
+            images=image_inputs if image_inputs else None,
+            videos=video_inputs if video_inputs else None,
+            padding=False,
+            truncation=False,
+            return_tensors="pt",
+        )
 
         lottie_target = self._encode_target(sample)
         input_ids = processor_outputs["input_ids"][0]
         attention_mask = processor_outputs["attention_mask"][0]
 
-        target_ids = torch.tensor(
-            [self.lottie_tokenizer.vocab.bos_token_id, *lottie_target, self.lottie_tokenizer.vocab.eos_token_id],
-            dtype=torch.long,
-        )
+        target_ids = torch.tensor(self.lottie_tokenizer.wrap_target(lottie_target), dtype=torch.long)
 
         labels = torch.full((input_ids.shape[0] + target_ids.shape[0],), -100, dtype=torch.long)
         labels[input_ids.shape[0] :] = target_ids
@@ -142,7 +119,7 @@ class MMLottieAutoregressiveDataset(Dataset):
         return batch
 
     def _build_messages(self, sample: Dict[str, Any]) -> List[Dict[str, Any]]:
-        content: List[Dict[str, Any]] = [{"type": "text", "text": self.system_prompt}]
+        content: List[Dict[str, Any]] = []
         image_value = self._normalize_media_value(_first_present(sample, self.field_map.image_candidates))
         video_value = self._normalize_media_value(_first_present(sample, self.field_map.video_candidates))
         text_value = _first_present(sample, self.field_map.text_candidates)
@@ -154,7 +131,11 @@ class MMLottieAutoregressiveDataset(Dataset):
         if text_value:
             content.append({"type": "text", "text": str(text_value)})
 
-        return [{"role": "user", "content": content}]
+        messages: List[Dict[str, Any]] = [{"role": "system", "content": self.system_prompt}]
+        if not content:
+            content.append({"type": "text", "text": "Generate a valid Lottie animation."})
+        messages.append({"role": "user", "content": content})
+        return messages
 
     @staticmethod
     def _normalize_media_value(value: Any) -> Any:

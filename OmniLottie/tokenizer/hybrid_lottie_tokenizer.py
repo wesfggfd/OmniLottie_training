@@ -9,7 +9,6 @@ from transformers import AutoConfig, AutoTokenizer
 from lottie.objects.animation import Animation
 from lottie.objects.lottie_param import from_sequence
 from lottie.objects.lottie_tokenize import LottieTensor
-from tokenizer.json_sequence_encoder import animation_to_sequence_text
 from tokenizer.offset_vocab import LottieVocabLayout
 
 
@@ -50,6 +49,18 @@ class HybridLottieTokenizer:
         base_vocab_size = getattr(getattr(base_config, "text_config", base_config), "vocab_size")
         self.vocab = LottieVocabLayout(base_vocab_size=base_vocab_size)
         LottieTensor.init_tokenizer(base_model_name)
+
+    @property
+    def bos_token_id(self) -> int:
+        return self.vocab.bos_token_id
+
+    @property
+    def eos_token_id(self) -> int:
+        return self.vocab.eos_token_id
+
+    @property
+    def pad_token_id(self) -> int:
+        return self.vocab.pad_token_id
 
     @staticmethod
     def tokenizer_command_specs() -> Dict[int, Dict[str, Any]]:
@@ -158,9 +169,11 @@ class HybridLottieTokenizer:
         return flattened
 
     def decode_token_ids(self, token_ids: Sequence[int]) -> LottieTensor:
-        open_source_tokens = [self.vocab.restore_opensource_token(token_id) for token_id in token_ids]
         LottieTensor.init_tokenizer(self.base_model_name)
-        return LottieTensor.from_list(open_source_tokens)
+        return LottieTensor.from_list(list(token_ids))
+
+    def wrap_target(self, token_ids: Sequence[int]) -> List[int]:
+        return [self.bos_token_id, *token_ids, self.eos_token_id]
 
     def token_ids_to_sequence(self, token_ids: Sequence[int]) -> str:
         return self.decode_token_ids(token_ids).to_sequence()
