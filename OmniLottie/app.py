@@ -13,7 +13,7 @@ from PIL import Image as PILImage
 from decord import VideoReader, cpu
 
 from decoder import LottieDecoder
-from transformers import AutoProcessor
+from transformers import AutoConfig, AutoProcessor
 from qwen_vl_utils import process_vision_info
 from lottie.objects.lottie_tokenize import LottieTensor
 from lottie.objects.lottie_param import (
@@ -22,6 +22,7 @@ from lottie.objects.lottie_param import (
     shape_layer_to_json, null_layer_to_json, precomp_layer_to_json,
     text_layer_to_json, solid_layer_to_json, font_to_json, char_to_json
 )
+from tokenizer.offset_vocab import LottieVocabLayout
 
 SYSTEM_PROMPT = "You are a Lottie animation expert."
 VIDEO_PROMPT = "Turn this video into Lottie code."
@@ -35,6 +36,18 @@ device = None
 
 generation_lock = threading.Lock()
 
+
+def configure_lottie_token_ids(model_path: str) -> None:
+    global LOTTIE_BOS, LOTTIE_EOS, PAD_TOKEN
+
+    base_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    base_vocab_size = getattr(getattr(base_config, "text_config", base_config), "vocab_size")
+    layout = LottieVocabLayout(base_vocab_size=base_vocab_size)
+
+    LOTTIE_BOS = layout.bos_token_id
+    LOTTIE_EOS = layout.eos_token_id
+    PAD_TOKEN = layout.pad_token_id
+
 def load_model_once():
     global model, processor, device
 
@@ -42,12 +55,13 @@ def load_model_once():
         return model, processor, device
 
     checkpoint_path = "/PATH/TO/OmniLottie"
+    processor_path = os.environ.get("PROCESSOR_PATH", "Qwen/Qwen3.5-9B")
 
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "xpu:0" if torch.xpu.is_available() else "cpu")
 
     print(f"Loading model from {checkpoint_path}...")
-    model = LottieDecoder(pix_len=4560, text_len=1500)
+    model = LottieDecoder(pix_len=4560, text_len=1500, model_path=processor_path)
 
     model_file = os.path.join(checkpoint_path, 'pytorch_model.bin')
     if os.path.exists(model_file):
@@ -58,9 +72,11 @@ def load_model_once():
     model = model.to(device).eval()
 
     processor = AutoProcessor.from_pretrained(
-        "Qwen/Qwen2.5-VL-3B-Instruct",
+        processor_path,
         padding_side="left"
     )
+    configure_lottie_token_ids(processor_path)
+    LottieTensor.init_tokenizer(processor_path)
 
     print(f"✅ Model loaded on {device}")
 

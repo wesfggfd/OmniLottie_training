@@ -17,7 +17,7 @@ from transformers import AutoProcessor, get_cosine_schedule_with_warmup
 
 from data.collator import LottieDataCollator
 from data.lottie_dataset import LottieFieldMap, MMLottieAutoregressiveDataset
-from models.lottie_qwen35 import LottieQwen35Config, LottieQwen35ForConditionalGeneration
+from decoder import LottieDecoder
 from tokenizer.hybrid_lottie_tokenizer import HybridLottieTokenizer
 
 
@@ -29,20 +29,32 @@ def build_optimizer(
 ) -> torch.optim.Optimizer:
     lottie_params: List[torch.nn.Parameter] = []
     lora_params: List[torch.nn.Parameter] = []
+    other_params: List[torch.nn.Parameter] = []
+    lottie_param_ids = {
+        id(model.transformer.get_input_embeddings().weight),
+        id(model.transformer.get_output_embeddings().weight),
+    }
 
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-        if "lottie_embedding" in name or "lottie_head" in name:
+        if id(param) in lottie_param_ids:
             lottie_params.append(param)
         elif "lora_" in name:
             lora_params.append(param)
+        else:
+            other_params.append(param)
+
+    param_groups = []
+    if lottie_params:
+        param_groups.append({"params": lottie_params, "lr": lottie_lr, "weight_decay": weight_decay})
+    if lora_params:
+        param_groups.append({"params": lora_params, "lr": lora_lr, "weight_decay": weight_decay})
+    if other_params:
+        param_groups.append({"params": other_params, "lr": lora_lr, "weight_decay": weight_decay})
 
     return torch.optim.AdamW(
-        [
-            {"params": lottie_params, "lr": lottie_lr, "weight_decay": weight_decay},
-            {"params": lora_params, "lr": lora_lr, "weight_decay": weight_decay},
-        ],
+        param_groups,
         betas=(0.9, 0.95),
     )
 
@@ -176,14 +188,11 @@ def main() -> None:
 
     processor = AutoProcessor.from_pretrained(args.model_path, trust_remote_code=True, padding_side="left")
     lottie_tokenizer = HybridLottieTokenizer(args.model_path)
-
-    model_config = LottieQwen35Config(
-        base_model_path=args.model_path,
-        vocab_size=lottie_tokenizer.vocab.vocab_size,
-        bos_token_id=lottie_tokenizer.vocab.bos_token_id,
-        eos_token_id=lottie_tokenizer.vocab.eos_token_id,
+    model = LottieDecoder(
+        pix_len=4560,
+        text_len=1500,
+        model_path=args.model_path,
     )
-    model = LottieQwen35ForConditionalGeneration(model_config)
 
     lora_config = LoraConfig(
         r=args.lora_rank,
@@ -191,9 +200,11 @@ def main() -> None:
         lora_dropout=args.lora_dropout,
         bias="none",
         task_type="CAUSAL_LM",
-        target_modules=LottieQwen35ForConditionalGeneration.default_lora_target_modules(),
+        target_modules=LottieDecoder.default_lora_target_modules(),
     )
     model.transformer = get_peft_model(model.transformer, lora_config)
+    model.transformer.get_input_embeddings().weight.requires_grad_(True)
+    model.transformer.get_output_embeddings().weight.requires_grad_(True)
     model.transformer.gradient_checkpointing_enable()
 
     field_map = LottieFieldMap()
@@ -214,7 +225,7 @@ def main() -> None:
         max_seq_len=args.max_seq_len,
     )
 
-    collator = LottieDataCollator(pad_token_id=model_config.pad_token_id)
+    collator = LottieDataCollator(pad_token_id=model.pad_token_id)
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.per_device_batch,

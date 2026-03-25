@@ -20,7 +20,7 @@ from safetensors.torch import load_file
 from huggingface_hub import snapshot_download
 from datasets import load_dataset, load_from_disk
 from decoder import LottieDecoder
-from transformers import AutoTokenizer, AutoProcessor
+from transformers import AutoConfig, AutoTokenizer, AutoProcessor
 from qwen_vl_utils import process_vision_info
 from decord import VideoReader, cpu
 
@@ -33,6 +33,7 @@ from lottie.objects.lottie_param import (
 )
 
 from PIL import Image as PILImage
+from tokenizer.offset_vocab import LottieVocabLayout
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 torch.backends.cudnn.benchmark = False
@@ -52,6 +53,20 @@ LOTTIE_EOS = 192399
 PAD_TOKEN = 151643
 COMMAND_OFFSET = 151936
 NUM_COMMANDS = 282
+
+
+def configure_lottie_token_ids(model_path: str) -> None:
+    global LOTTIE_BOS, LOTTIE_EOS, PAD_TOKEN, COMMAND_OFFSET, NUM_COMMANDS
+
+    base_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    base_vocab_size = getattr(getattr(base_config, "text_config", base_config), "vocab_size")
+    layout = LottieVocabLayout(base_vocab_size=base_vocab_size)
+
+    LOTTIE_BOS = layout.bos_token_id
+    LOTTIE_EOS = layout.eos_token_id
+    PAD_TOKEN = layout.pad_token_id
+    COMMAND_OFFSET = layout.command_offset
+    NUM_COMMANDS = layout.num_commands
 
 def sanitize_filename(text, max_length=180):
     text = re.sub(r'[<>:"/\\|?*\n\r\t]', '_', text)
@@ -820,8 +835,10 @@ def run_batch_text_file_inference(args, cfg):
     print("Loading model...")
     processor = AutoProcessor.from_pretrained(cfg['tokenizer_name'], padding_side="left")
     processor.tokenizer.padding_side = "left"
+    configure_lottie_token_ids(cfg['tokenizer_name'])
+    LottieTensor.init_tokenizer(cfg['tokenizer_name'])
 
-    model = LottieDecoder(pix_len=cfg['pix_len'], text_len=cfg['text_len'])
+    model = LottieDecoder(pix_len=cfg['pix_len'], text_len=cfg['text_len'], model_path=cfg['tokenizer_name'])
 
 
     if os.path.isfile(args.sketch_weight) and args.sketch_weight.endswith('.bin'):
@@ -958,8 +975,10 @@ def run_mmlottie_bench_inference(args, cfg):
     print("\nLoading model...")
     processor = AutoProcessor.from_pretrained(cfg['tokenizer_name'], padding_side="left")
     processor.tokenizer.padding_side = "left"
+    configure_lottie_token_ids(cfg['tokenizer_name'])
+    LottieTensor.init_tokenizer(cfg['tokenizer_name'])
 
-    model = LottieDecoder(pix_len=cfg['pix_len'], text_len=cfg['text_len'])
+    model = LottieDecoder(pix_len=cfg['pix_len'], text_len=cfg['text_len'], model_path=cfg['tokenizer_name'])
 
     if os.path.isfile(args.sketch_weight) and args.sketch_weight.endswith('.bin'):
         model_path = args.sketch_weight
@@ -1193,8 +1212,10 @@ def run_single_inference(args, cfg):
     print("Loading model...")
     processor = AutoProcessor.from_pretrained(cfg['tokenizer_name'], padding_side="left")
     processor.tokenizer.padding_side = "left"
+    configure_lottie_token_ids(cfg['tokenizer_name'])
+    LottieTensor.init_tokenizer(cfg['tokenizer_name'])
     
-    model = LottieDecoder(pix_len=cfg['pix_len'], text_len=cfg['text_len'])
+    model = LottieDecoder(pix_len=cfg['pix_len'], text_len=cfg['text_len'], model_path=cfg['tokenizer_name'])
     
     model_path = os.path.join(args.sketch_weight, 'pytorch_model.bin')
     safetensors_path = os.path.join(args.sketch_weight, 'model.safetensors')
@@ -1270,7 +1291,7 @@ if __name__ == "__main__":
     parser.add_argument("--sketch_weight", type=str, required=True,
                         help="Path to model checkpoint directory")
     parser.add_argument("--tokenizer_name", type=str, 
-                        default="Qwen/Qwen2.5-VL-3B-Instruct")
+                        default="Qwen/Qwen3.5-9B")
     
     parser.add_argument("--output_dir", type=str, default="./output")
     

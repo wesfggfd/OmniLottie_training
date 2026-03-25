@@ -25,8 +25,6 @@ from PIL import Image
 import numpy as np
 from decord import VideoReader, cpu
 
-# Import HF-compatible model
-from decoder_hf import LottieDecoder
 from transformers import AutoProcessor
 from qwen_vl_utils import process_vision_info
 
@@ -38,13 +36,12 @@ from lottie.objects.lottie_param import (
     shape_layer_to_json, null_layer_to_json, precomp_layer_to_json,
     text_layer_to_json, solid_layer_to_json, font_to_json, char_to_json
 )
+from decoder_hf import LottieDecoder
+from tokenizer.hybrid_lottie_tokenizer import HybridLottieTokenizer
 
 # Constants
 SYSTEM_PROMPT = "You are a Lottie animation expert."
 VIDEO_PROMPT = "Turn this video into Lottie code."
-LOTTIE_BOS = 192398
-LOTTIE_EOS = 192399
-PAD_TOKEN = 151643
 
 
 def simplify_to_animation_description(text):
@@ -152,7 +149,7 @@ def build_messages(task_type, text_prompt=None, image=None, video_frames=None):
     return messages
 
 
-def prepare_inference_input(processor, messages, device):
+def prepare_inference_input(processor, messages, device, pad_token_id):
     """Prepare input for inference (matches app_hf.py exactly)"""
     text_input = processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
@@ -175,7 +172,7 @@ def prepare_inference_input(processor, messages, device):
     if input_ids.shape[1] < target_len:
         pad_len = target_len - input_ids.shape[1]
         input_ids = torch.cat([
-            torch.full((1, pad_len), PAD_TOKEN, dtype=torch.long),
+            torch.full((1, pad_len), pad_token_id, dtype=torch.long),
             input_ids
         ], dim=1)
         attention_mask = torch.cat([
@@ -195,7 +192,19 @@ def prepare_inference_input(processor, messages, device):
     return result
 
 
-def generate_lottie(model, inputs, max_tokens, device, use_sampling=False, temperature=0.9, top_p=0.25, top_k=5):
+def generate_lottie(
+    model,
+    inputs,
+    max_tokens,
+    device,
+    bos_token_id,
+    eos_token_id,
+    pad_token_id,
+    use_sampling=False,
+    temperature=0.9,
+    top_p=0.25,
+    top_k=5,
+):
     """Generate Lottie tokens (matches app_hf.py exactly)"""
     model.transformer.rope_deltas = None
     position_ids, _ = model.transformer.get_rope_index(
@@ -215,8 +224,8 @@ def generate_lottie(model, inputs, max_tokens, device, use_sampling=False, tempe
         'video_grid_thw': inputs.get('video_grid_thw'),
         'position_ids': position_ids,
         'max_new_tokens': max_tokens,
-        'eos_token_id': LOTTIE_EOS,
-        'pad_token_id': PAD_TOKEN,
+        'eos_token_id': eos_token_id,
+        'pad_token_id': pad_token_id,
         'use_cache': True,
     }
 
@@ -233,19 +242,17 @@ def generate_lottie(model, inputs, max_tokens, device, use_sampling=False, tempe
 
     del outputs, kwargs, position_ids
 
-    if generated_ids and generated_ids[0] == LOTTIE_BOS:
+    if generated_ids and generated_ids[0] == bos_token_id:
         generated_ids = generated_ids[1:]
-    if LOTTIE_EOS in generated_ids:
-        generated_ids = generated_ids[:generated_ids.index(LOTTIE_EOS)]
+    if eos_token_id in generated_ids:
+        generated_ids = generated_ids[:generated_ids.index(eos_token_id)]
 
     return generated_ids
 
 
-def tokens_to_lottie_json(generated_ids):
+def tokens_to_lottie_json(generated_ids, lottie_tokenizer: HybridLottieTokenizer):
     """Convert generated tokens to Lottie JSON format"""
-    reconstructed_tensor = LottieTensor.from_list(generated_ids)
-    reconstructed_sequence = reconstructed_tensor.to_sequence()
-    reconstructed = from_sequence(reconstructed_sequence)
+    reconstructed = lottie_tokenizer.token_ids_to_lottie_json(generated_ids)
 
     json_animation = {
         "v": reconstructed.get("v", "5.5.2"),
@@ -326,7 +333,7 @@ def main():
     # Model arguments
     parser.add_argument('--model_path', type=str, required=True,
                       help='Model path (local path or HF Hub ID, e.g. OmniLottie/OmniLottie)')
-    parser.add_argument('--processor_path', type=str, default='Qwen/Qwen2.5-VL-3B-Instruct',
+    parser.add_argument('--processor_path', type=str, default=None,
                       help='Processor path (local path or HF Hub ID)')
 
     # Input arguments (choose one)
@@ -372,18 +379,22 @@ def main():
     model = LottieDecoder.from_pretrained(
         args.model_path,
         torch_dtype=torch.bfloat16,
-        trust_remote_code=True
     )
     model = model.to(device).eval()
-    print(f"   ✓ Model loaded (vocab_size: {model.vocab_size})")
+    print(f"   ✓ Model loaded (vocab_size: {model.config.vocab_size})")
 
-    print(f"\n2. Loading processor from: {args.processor_path}")
+    processor_path = args.processor_path or model.config.base_model_path
+    print(f"\n2. Loading processor from: {processor_path}")
     processor = AutoProcessor.from_pretrained(
-        args.processor_path,
+        processor_path,
         padding_side="left",
         trust_remote_code=True
     )
     print(f"   ✓ Processor loaded")
+    lottie_tokenizer = HybridLottieTokenizer(model.config.base_model_path)
+    bos_token_id = lottie_tokenizer.bos_token_id
+    eos_token_id = lottie_tokenizer.eos_token_id
+    pad_token_id = lottie_tokenizer.pad_token_id
 
     # Prepare inputs
     print("\n" + "="*60)
@@ -411,7 +422,7 @@ def main():
         messages = build_messages("video", video_frames=frames)
 
     # Prepare inference input
-    inputs = prepare_inference_input(processor, messages, device)
+    inputs = prepare_inference_input(processor, messages, device, pad_token_id)
 
     # Generate
     print("\n" + "="*60)
@@ -423,6 +434,9 @@ def main():
         inputs=inputs,
         max_tokens=args.max_tokens,
         device=device,
+        bos_token_id=bos_token_id,
+        eos_token_id=eos_token_id,
+        pad_token_id=pad_token_id,
         use_sampling=args.do_sample,
         temperature=args.temperature,
         top_p=args.top_p,
@@ -433,7 +447,7 @@ def main():
 
     # Convert to JSON
     print("\nConverting tokens to Lottie JSON...")
-    lottie_json = tokens_to_lottie_json(lottie_tokens)
+    lottie_json = tokens_to_lottie_json(lottie_tokens, lottie_tokenizer)
 
     # Save
     output_path = Path(args.output)
