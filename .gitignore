@@ -58,14 +58,26 @@ Thumbs.db
 datasets/
 models/
 outputs/
+outputs_*/
+mmlottie_bench_hf/
 *.log
 *.tmp
+*.pdf
+=.*/
+=*
 .claude/
 
-# Training checkpoints
+# Training checkpoints and run artifacts
 checkpoint-*/
 best/
 final/
 latest_checkpoint.txt
 train_log.jsonl
 training_args.json
+*/checkpoint-*/
+*/best/
+*/final/
+*/train.log
+*/train_log.jsonl
+*/training_args.json
+gpu_watcher.log

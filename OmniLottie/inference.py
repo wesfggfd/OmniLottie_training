@@ -12,6 +12,7 @@ import random
 import pandas as pd
 import tempfile
 import copy
+import subprocess
 from PIL import Image
 from pathlib import Path
 from typing import List, Dict, Set, Optional, Tuple
@@ -20,7 +21,7 @@ from safetensors.torch import load_file
 from huggingface_hub import snapshot_download
 from datasets import load_dataset, load_from_disk
 from decoder import LottieDecoder
-from transformers import AutoConfig, AutoTokenizer, AutoProcessor
+from transformers import AutoConfig, AutoTokenizer, AutoProcessor, LogitsProcessor
 from qwen_vl_utils import process_vision_info
 from decord import VideoReader, cpu
 
@@ -53,11 +54,69 @@ LOTTIE_EOS = 192399
 PAD_TOKEN = 151643
 COMMAND_OFFSET = 151936
 NUM_COMMANDS = 282
+TOKENIZER_LENGTH = 151643
+LOTTIE_TOKEN_START = 151643
+LOTTIE_TOKEN_END = 192399
+
+
+class LottieBoundaryLogitsProcessor(LogitsProcessor):
+    def __init__(
+        self,
+        bos_token_id: int,
+        eos_token_id: int,
+        pad_token_id: int,
+        prompt_length: int,
+        tokenizer_length: int,
+        lottie_token_start: int,
+        lottie_token_end: int,
+    ):
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
+        self.pad_token_id = pad_token_id
+        self.prompt_length = prompt_length
+        self.tokenizer_length = tokenizer_length
+        self.lottie_token_start = lottie_token_start
+        self.lottie_token_end = lottie_token_end
+        self._allowed_mask_cache: Optional[torch.Tensor] = None
+        self._allowed_mask_vocab_size: Optional[int] = None
+
+    def _get_allowed_mask(self, vocab_size: int, device: torch.device) -> torch.Tensor:
+        if self._allowed_mask_cache is not None and self._allowed_mask_vocab_size == vocab_size:
+            return self._allowed_mask_cache.to(device=device)
+
+        allowed = torch.zeros(vocab_size, dtype=torch.bool)
+        allowed[: min(self.tokenizer_length, vocab_size)] = True
+        lottie_start = max(0, min(self.lottie_token_start, vocab_size))
+        lottie_end = max(lottie_start, min(self.lottie_token_end + 1, vocab_size))
+        allowed[lottie_start:lottie_end] = True
+        if 0 <= self.eos_token_id < vocab_size:
+            allowed[self.eos_token_id] = True
+        self._allowed_mask_cache = allowed
+        self._allowed_mask_vocab_size = vocab_size
+        return allowed.to(device=device)
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        generation_step = input_ids.shape[1] - self.prompt_length
+        vocab_size = scores.shape[-1]
+        allowed_mask = self._get_allowed_mask(vocab_size=vocab_size, device=scores.device)
+        scores = scores.masked_fill(~allowed_mask.unsqueeze(0), float('-inf'))
+
+        if 0 <= self.pad_token_id < vocab_size:
+            scores[:, self.pad_token_id] = float('-inf')
+        if generation_step == 0:
+            scores.fill_(float('-inf'))
+            if 0 <= self.bos_token_id < vocab_size:
+                scores[:, self.bos_token_id] = 0.0
+        else:
+            if 0 <= self.bos_token_id < vocab_size:
+                scores[:, self.bos_token_id] = float('-inf')
+        return scores
 
 
 def configure_lottie_token_ids(model_path: str) -> None:
-    global LOTTIE_BOS, LOTTIE_EOS, PAD_TOKEN, COMMAND_OFFSET, NUM_COMMANDS
+    global LOTTIE_BOS, LOTTIE_EOS, PAD_TOKEN, COMMAND_OFFSET, NUM_COMMANDS, TOKENIZER_LENGTH, LOTTIE_TOKEN_START, LOTTIE_TOKEN_END
 
+    base_tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     base_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     base_vocab_size = getattr(getattr(base_config, "text_config", base_config), "vocab_size")
     layout = LottieVocabLayout(base_vocab_size=base_vocab_size)
@@ -67,6 +126,9 @@ def configure_lottie_token_ids(model_path: str) -> None:
     PAD_TOKEN = layout.pad_token_id
     COMMAND_OFFSET = layout.command_offset
     NUM_COMMANDS = layout.num_commands
+    TOKENIZER_LENGTH = len(base_tokenizer)
+    LOTTIE_TOKEN_START = layout.lottie_token_start
+    LOTTIE_TOKEN_END = layout.lottie_token_end
 
 def sanitize_filename(text, max_length=180):
     text = re.sub(r'[<>:"/\\|?*\n\r\t]', '_', text)
@@ -274,17 +336,30 @@ def generate_lottie(
         video_grid_thw=inputs.get('video_grid_thw'))
     position_ids = position_ids * inputs['attention_mask'][None, ]
 
+    logits_processor = [
+        LottieBoundaryLogitsProcessor(
+            bos_token_id=LOTTIE_BOS,
+            eos_token_id=LOTTIE_EOS,
+            pad_token_id=PAD_TOKEN,
+            prompt_length=inputs['input_ids'].shape[1],
+            tokenizer_length=TOKENIZER_LENGTH,
+            lottie_token_start=LOTTIE_TOKEN_START,
+            lottie_token_end=LOTTIE_TOKEN_END,
+        )
+    ]
+
     generate_kwargs = {
         'input_ids': inputs['input_ids'],
         'attention_mask': inputs['attention_mask'],
-        'position_ids': position_ids,  
+        'position_ids': position_ids,
         'max_new_tokens': max_new_tokens,
-        'min_new_tokens': 20,  
-        'num_return_sequences': num_candidates,  
+        'min_new_tokens': 20,
+        'num_return_sequences': num_candidates,
         'eos_token_id': LOTTIE_EOS,
         'pad_token_id': PAD_TOKEN,
         'use_cache': True,
         'return_dict_in_generate': True,
+        'logits_processor': logits_processor,
     }
 
     if inputs.get('pixel_values') is not None:
@@ -310,7 +385,7 @@ def generate_lottie(
             print(f"  Using sampling: temp={temperature}, top_p={top_p}, top_k={top_k}")
     else:
         generate_kwargs.update({
-            'do_sample': True,
+            'do_sample': False,
             'num_beams': 1,
         })
         if verbose:
@@ -342,10 +417,12 @@ def generate_lottie(
                 'input_len': input_len,
                 'task_type': inputs.get('task_type', 'unknown'),
                 'generated_len': len(generated_ids),
-                'has_bos': LOTTIE_BOS in generated_ids,
+                'has_bos': len(generated_ids) > 0 and generated_ids[0] == LOTTIE_BOS,
                 'has_eos': LOTTIE_EOS in generated_ids,
-                'valid_lottie_tokens': sum(1 for t in generated_ids if t >= COMMAND_OFFSET),
+                'valid_lottie_tokens': sum(1 for t in generated_ids if COMMAND_OFFSET <= t <= LOTTIE_TOKEN_END),
                 'raw_tokens': generated_ids.copy(),
+                'boundary_constraint_applied': True,
+                'range_constraint_applied': True,
             }
 
             clean_ids = clean_generated_tokens(generated_ids)
@@ -743,10 +820,21 @@ def run_inference(
         if verbose:
             print(f"  Only 1 valid candidate, using it")
     else:
-        candidates_for_scoring = [
-            (lottie_json, token_ids, has_eos, cand_idx)
-            for lottie_json, token_ids, has_eos, cand_idx, _ in processed_candidates
-        ]
+        scored_candidates = []
+        for idx, (cand_lottie, cand_tokens, cand_has_eos, cand_idx, cand_info) in enumerate(processed_candidates):
+            score = 0.0
+            details = {
+                'valid_json': 1.0 if cand_info.get('is_valid') else 0.0,
+                'has_eos': 1.0 if cand_has_eos else 0.0,
+                'token_count': float(len(cand_tokens)),
+                'layer_count': float(len(cand_lottie.get('layers', []))) if isinstance(cand_lottie, dict) else 0.0,
+            }
+            score += details['valid_json'] * 1000.0
+            score += details['has_eos'] * 100.0
+            score += min(details['token_count'], 4096.0) * 0.01
+            score += min(details['layer_count'], 256.0) * 0.1
+            scored_candidates.append((score, details, idx))
+        best_score, best_details, best_idx = max(scored_candidates, key=lambda x: x[0])
 
     lottie_json, generated_ids, has_eos, selected_cand_idx, gen_info = processed_candidates[best_idx]
 
@@ -822,11 +910,156 @@ def run_inference(
     return lottie_json, gen_info
 
 
+def select_inference_device(preferred_gpu: Optional[int] = None) -> torch.device:
+    if torch.cuda.is_available():
+        gpu_count = torch.cuda.device_count()
+        if preferred_gpu is not None:
+            if preferred_gpu < 0 or preferred_gpu >= gpu_count:
+                raise ValueError(f"Requested GPU index {preferred_gpu} is out of range for {gpu_count} visible GPUs")
+            return torch.device(f"cuda:{preferred_gpu}")
+
+        lock_dir = Path(os.environ.get("OMNILOTTIE_GPU_LOCK_DIR", "/tmp/omnilottie_gpu_claims"))
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        poll_interval = float(os.environ.get("OMNILOTTIE_GPU_POLL_INTERVAL", "1"))
+
+        while True:
+            try:
+                smi = subprocess.run(
+                    [
+                        "nvidia-smi",
+                        "--query-gpu=index,utilization.gpu,memory.used",
+                        "--format=csv,noheader,nounits",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                for line in smi.stdout.strip().splitlines():
+                    parts = [part.strip() for part in line.split(",")]
+                    if len(parts) != 3:
+                        continue
+                    gpu_index = int(parts[0])
+                    gpu_util = int(parts[1])
+                    mem_used = int(parts[2])
+                    if gpu_index == 0:
+                        continue
+                    if gpu_util != 0 or mem_used != 0:
+                        continue
+
+                    lock_file = lock_dir / f"gpu_{gpu_index}.lock"
+                    try:
+                        fd = os.open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                        os.close(fd)
+                        print(f"Auto-selected idle non-gpu0 device cuda:{gpu_index} (util=0%, mem=0 MiB)")
+                        return torch.device(f"cuda:{gpu_index}")
+                    except FileExistsError:
+                        continue
+            except Exception as e:
+                print(f"Warning: automatic idle GPU selection failed, retrying ({e})")
+
+            print(f"No non-gpu0 idle GPU available yet; retrying in {poll_interval:.1f}s...")
+            time.sleep(poll_interval)
+
+    if torch.xpu.is_available():
+        return torch.device("xpu:0")
+    return torch.device("cpu")
+
+
+class GenerationMetrics:
+    def __init__(self):
+        self.total = 0
+        self.decode_success = 0
+        self.valid_json = 0
+        self.has_eos = 0
+        self.has_bos = 0
+        self.total_generated_tokens = 0
+        self.total_layers = 0
+
+    def update(self, lottie_json: Optional[dict], info: Dict[str, object]) -> None:
+        self.total += 1
+        if lottie_json is not None:
+            self.decode_success += 1
+        if info.get('is_valid'):
+            self.valid_json += 1
+        if info.get('has_eos'):
+            self.has_eos += 1
+        if info.get('has_bos'):
+            self.has_bos += 1
+        self.total_generated_tokens += int(info.get('generated_len', 0) or 0)
+        if isinstance(lottie_json, dict):
+            self.total_layers += len(lottie_json.get('layers', []))
+
+    def summary(self) -> Dict[str, float]:
+        denom = max(1, self.total)
+        success_denom = max(1, self.decode_success)
+        return {
+            'total': self.total,
+            'decode_success_rate': self.decode_success / denom,
+            'valid_json_rate': self.valid_json / denom,
+            'eos_rate': self.has_eos / denom,
+            'bos_rate': self.has_bos / denom,
+            'avg_generated_tokens': self.total_generated_tokens / denom,
+            'avg_layers_on_success': self.total_layers / success_denom,
+        }
+
+
+def run_roundtrip_validation(args, cfg):
+    device = select_inference_device(args.gpu_id)
+    print(f"Using device: {device}")
+    print("Roundtrip validation uses tokenizer/rule path only; model weights are not loaded.")
+
+    configure_lottie_token_ids(cfg['tokenizer_name'])
+    tokenizer = LottieTensor
+    tokenizer.init_tokenizer(cfg['tokenizer_name'])
+
+    from lottie.objects.lottie_rule_tokenizer import LottieRuleTokenizer
+
+    rule_tokenizer = LottieRuleTokenizer(cfg['tokenizer_name'])
+    dataset = load_dataset("OmniLottie/MMLottieBench", split=args.roundtrip_split)
+    max_samples = len(dataset) if args.max_samples < 0 else min(args.max_samples, len(dataset))
+    dataset = dataset.select(range(max_samples))
+
+    results = []
+    passed = 0
+    for idx, sample in enumerate(dataset):
+        sample_id = sample.get('id', f'sample_{idx}')
+        target = sample.get('lottie_json') or sample.get('json') or sample.get('animation_json') or sample.get('lottie')
+        if target is None:
+            results.append({'id': sample_id, 'status': 'skipped', 'reason': 'missing_target'})
+            continue
+        try:
+            metrics = rule_tokenizer.validate_roundtrip(target)
+            result = {'id': sample_id, 'status': 'ok', **metrics}
+            passed += 1
+        except Exception as e:
+            result = {'id': sample_id, 'status': 'failed', 'error': str(e)}
+        results.append(result)
+        print(f"[{idx + 1}/{max_samples}] {sample_id}: {result['status']}")
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    output_path = os.path.join(args.output_dir, f"roundtrip_{args.roundtrip_split}.json")
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(
+            {
+                'split': args.roundtrip_split,
+                'tokenizer_name': cfg['tokenizer_name'],
+                'total': len(results),
+                'passed': passed,
+                'pass_rate': passed / max(1, len(results)),
+                'results': results,
+            },
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )
+    print(f"Saved roundtrip report to: {output_path}")
+
+
 def run_batch_text_file_inference(args, cfg):
     """
     Generate Lottie from text file.
     """
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "xpu:0" if torch.xpu.is_available() else "cpu")
+    device = select_inference_device(args.gpu_id)
     print(f"Using device: {device}")
 
     if not os.path.exists(args.batch_text_file):
@@ -871,6 +1104,7 @@ def run_batch_text_file_inference(args, cfg):
     print(f"Output directory: {output_dir}")
 
     stats = {'success': 0, 'fail': 0, 'total': len(prompts)}
+    metrics = GenerationMetrics()
 
     print(f"\n{'='*60}")
     print(f"Starting batch text2lottie generation...")
@@ -901,6 +1135,7 @@ def run_batch_text_file_inference(args, cfg):
                 verbose=False,  
             )
 
+            metrics.update(lottie_json, gen_info)
             if lottie_json:
                 print(f"  ✅ Success: {output_path}")
                 print(f"     Layers: {len(lottie_json.get('layers', []))}, Tokens: {gen_info.get('generated_len', 0)}")
@@ -922,6 +1157,14 @@ def run_batch_text_file_inference(args, cfg):
     print(f"  ✅ Success: {stats['success']}")
     print(f"  ❌ Failed: {stats['fail']}")
     print(f"  Success rate: {stats['success']/stats['total']*100:.1f}%")
+    metric_summary = metrics.summary()
+    print("  Validity-aware metrics:")
+    print(f"    decode_success_rate: {metric_summary['decode_success_rate']:.3f}")
+    print(f"    valid_json_rate: {metric_summary['valid_json_rate']:.3f}")
+    print(f"    eos_rate: {metric_summary['eos_rate']:.3f}")
+    print(f"    bos_rate: {metric_summary['bos_rate']:.3f}")
+    print(f"    avg_generated_tokens: {metric_summary['avg_generated_tokens']:.1f}")
+    print(f"    avg_layers_on_success: {metric_summary['avg_layers_on_success']:.1f}")
     print(f"\nOutput directory: {output_dir}")
     print(f"{'='*60}")
 
@@ -935,7 +1178,7 @@ def run_mmlottie_bench_inference(args, cfg):
         - Task types: Text-to-Lottie, Text-Image-to-Lottie, Video-to-Lottie
         - Fields: id, text, image, video, task_type, subset, etc.
     """
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "xpu:0" if torch.xpu.is_available() else "cpu")
+    device = select_inference_device(args.gpu_id)
     print(f"Using device: {device}")
 
     # 1. Load dataset
@@ -1025,6 +1268,11 @@ def run_mmlottie_bench_inference(args, cfg):
         'Text-Image-to-Lottie': {'success': 0, 'fail': 0, 'total': 0},
         'Video-to-Lottie': {'success': 0, 'fail': 0, 'total': 0}
     }
+    metrics_by_task = {
+        'Text-to-Lottie': GenerationMetrics(),
+        'Text-Image-to-Lottie': GenerationMetrics(),
+        'Video-to-Lottie': GenerationMetrics(),
+    }
 
     # 6. Process each sample
     print(f"\n{'='*60}")
@@ -1062,7 +1310,8 @@ def run_mmlottie_bench_inference(args, cfg):
                     output_path=output_path,
                     verbose=False
                 )
-                
+
+                metrics_by_task[task_type].update(lottie_json, info)
                 if lottie_json is not None:
                     print(f"  ✅ Saved to {output_path}")
                     stats[task_type]['success'] += 1
@@ -1110,6 +1359,7 @@ def run_mmlottie_bench_inference(args, cfg):
                 # Cleanup temp file
                 os.unlink(tmp_img_path)
 
+                metrics_by_task[task_type].update(lottie_json, info)
                 if lottie_json is not None:
                     print(f"  ✅ Saved to {output_path}")
                     stats[task_type]['success'] += 1
@@ -1162,6 +1412,7 @@ def run_mmlottie_bench_inference(args, cfg):
                         verbose=False
                     )
 
+                    metrics_by_task[task_type].update(lottie_json, info)
                     if lottie_json is not None:
                         print(f"  ✅ Saved to {output_path}")
                         stats[task_type]['success'] += 1
@@ -1199,15 +1450,22 @@ def run_mmlottie_bench_inference(args, cfg):
     for task_type, task_stats in stats.items():
         if task_stats['total'] > 0:
             success_rate = task_stats['success'] / task_stats['total'] * 100
+            metric_summary = metrics_by_task[task_type].summary()
             print(f"{task_type}:")
             print(f"  Success: {task_stats['success']}/{task_stats['total']} ({success_rate:.1f}%)")
             print(f"  Failed: {task_stats['fail']}/{task_stats['total']}")
+            print(f"  decode_success_rate: {metric_summary['decode_success_rate']:.3f}")
+            print(f"  valid_json_rate: {metric_summary['valid_json_rate']:.3f}")
+            print(f"  eos_rate: {metric_summary['eos_rate']:.3f}")
+            print(f"  bos_rate: {metric_summary['bos_rate']:.3f}")
+            print(f"  avg_generated_tokens: {metric_summary['avg_generated_tokens']:.1f}")
+            print(f"  avg_layers_on_success: {metric_summary['avg_layers_on_success']:.1f}")
     print(f"\nOutput directory: {output_base}")
     print(f"{'='*60}")
 
 
 def run_single_inference(args, cfg):
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "xpu:0" if torch.xpu.is_available() else "cpu")
+    device = select_inference_device(args.gpu_id)
     
     print("Loading model...")
     processor = AutoProcessor.from_pretrained(cfg['tokenizer_name'], padding_side="left")
@@ -1344,6 +1602,13 @@ if __name__ == "__main__":
     parser.add_argument("--verbose", action="store_true", default=True,
                         help="Verbose output")
 
+    parser.add_argument("--gpu_id", type=int, default=None,
+                        help="GPU index for inference/validation. If omitted, automatically pick an idle GPU excluding gpu0 when possible")
+    parser.add_argument("--roundtrip_split", type=str, choices=['real', 'synthetic'], default='real',
+                        help="Split used by roundtrip validation")
+    parser.add_argument("--roundtrip_validate", action="store_true",
+                        help="Run tokenizer roundtrip validation instead of generation")
+
     parser.add_argument("--num_candidates", type=int, default=1,
                         help="Number of candidates to generate (for Best-of-N selection, default: 1)")
 
@@ -1370,7 +1635,10 @@ if __name__ == "__main__":
         print(f"🆕 Num candidates: {args.num_candidates} (Best-of-{args.num_candidates})")
     print("=" * 60)
     
-    if args.single_video or args.single_image or args.single_text:
+    if args.roundtrip_validate:
+        print("\nRunning tokenizer roundtrip validation...")
+        run_roundtrip_validation(args, cfg)
+    elif args.single_video or args.single_image or args.single_text:
         print("\nRunning single sample inference...")
         run_single_inference(args, cfg)
     elif args.batch_text_file:

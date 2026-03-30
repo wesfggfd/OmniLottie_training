@@ -113,10 +113,42 @@ class LottieRuleTokenizer:
     def __init__(self, base_model_name: str = "Qwen/Qwen3.5-9B"):
         self.base_model_name = base_model_name
         self.base_tokenizer = AutoTokenizer.from_pretrained(base_model_name, trust_remote_code=True)
-        base_config = AutoConfig.from_pretrained(base_model_name, trust_remote_code=True)
-        base_vocab_size = getattr(getattr(base_config, "text_config", base_config), "vocab_size")
+        self.base_config = AutoConfig.from_pretrained(base_model_name, trust_remote_code=True)
+        base_vocab_size = getattr(getattr(self.base_config, "text_config", self.base_config), "vocab_size")
+        self.tokenizer_length = len(self.base_tokenizer)
         self.vocab = LottieVocabLayout(base_vocab_size=base_vocab_size)
         LottieTensor.init_tokenizer(base_model_name)
+        self.validate_base_layout()
+
+    def validate_base_layout(self) -> None:
+        if self.tokenizer_length > self.vocab.base_vocab_size:
+            raise ValueError(
+                f"Tokenizer length ({self.tokenizer_length}) exceeds config vocab_size ({self.vocab.base_vocab_size}). "
+                "Please verify the migrated base model vocabulary layout before shifting OmniLottie token IDs."
+            )
+
+    def layout_summary(self) -> Dict[str, int]:
+        return {
+            "config_vocab_size": self.vocab.base_vocab_size,
+            "tokenizer_length": self.tokenizer_length,
+            "shift": self.vocab.shift,
+            "lottie_token_start": self.vocab.lottie_token_start,
+            "lottie_token_end": self.vocab.lottie_token_end,
+            "bos_token_id": self.vocab.bos_token_id,
+            "eos_token_id": self.vocab.eos_token_id,
+            "pad_token_id": self.vocab.pad_token_id,
+            "command_offset": self.vocab.command_offset,
+            "number_offset": self.vocab.number_offset,
+        }
+
+    def validate_roundtrip(self, animation: Dict[str, Any] | str) -> Dict[str, Any]:
+        token_ids = self.encode_lottie_json(animation)
+        decoded = self.token_ids_to_lottie_json(token_ids)
+        return {
+            "token_count": len(token_ids),
+            "decoded_layers": len(decoded.get("layers", [])) if isinstance(decoded, dict) else -1,
+            "decoded_assets": len(decoded.get("assets", [])) if isinstance(decoded, dict) else -1,
+        }
 
     @property
     def bos_token_id(self) -> int:

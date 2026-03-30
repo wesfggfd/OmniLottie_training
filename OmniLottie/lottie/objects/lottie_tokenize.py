@@ -10,6 +10,7 @@ class LottieTensor:
     # Command type constants (添加新的命令常量)
     tokenizer = None
     tokenizer_name = None
+    _cached_shift = None        # cached result of get_token_id_shift()
     ORIGINAL_BASE_VOCAB_SIZE = 151643
     ORIGINAL_VOCAB_SIZE = 192400
     ORIGINAL_PAD_TOKEN_ID = 151643
@@ -3739,6 +3740,7 @@ class LottieTensor:
                         cls.tokenizer = AutoTokenizer.from_pretrained(path)
                         cls.tokenizer_name = path
                         cls._OFFSET_CACHE.clear()
+                        cls._cached_shift = None  # invalidate shift cache
                         # 只在主进程打印一次
                         import os
                         if os.environ.get('RANK', '0') == '0':
@@ -3751,6 +3753,7 @@ class LottieTensor:
                 cls.tokenizer = AutoTokenizer.from_pretrained(model_path)
                 cls.tokenizer_name = model_path
                 cls._OFFSET_CACHE.clear()
+                cls._cached_shift = None  # invalidate shift cache
     
     @classmethod
     def get_tokenizer(cls):
@@ -3760,9 +3763,28 @@ class LottieTensor:
 
     @classmethod
     def get_token_id_shift(cls) -> int:
-        tokenizer = cls.get_tokenizer()
-        base_vocab_size = getattr(tokenizer, "vocab_size", len(tokenizer))
-        return base_vocab_size - cls.ORIGINAL_BASE_VOCAB_SIZE
+        """Compute shift using config.vocab_size (padded), not tokenizer.vocab_size (BPE-only).
+        For Qwen3.5-9B: config.text_config.vocab_size=248320, tokenizer.vocab_size=248044.
+        Using tokenizer.vocab_size would give a shift of 96401 instead of the correct 96677,
+        causing a 276-token mis-alignment when de-shifting generated Lottie token IDs.
+        Result is cached to avoid repeated AutoConfig.from_pretrained() calls per token."""
+        if cls._cached_shift is not None:
+            return cls._cached_shift
+        cls.get_tokenizer()  # ensure tokenizer loaded
+        # Prefer the config vocab_size (includes embedding padding) to match what
+        # LottieDecoder / LottieVocabLayout use for resizing the model embedding.
+        try:
+            from transformers import AutoConfig
+            tokenizer_name = cls.tokenizer_name or cls.DEFAULT_TOKENIZER_PATH
+            cfg = AutoConfig.from_pretrained(tokenizer_name, trust_remote_code=True)
+            tcfg = getattr(cfg, "text_config", cfg)
+            base_vocab_size = tcfg.vocab_size
+        except Exception:
+            # Fallback: len(tokenizer) includes added special tokens and is closer
+            # to config.vocab_size than tokenizer.vocab_size (BPE-only).
+            base_vocab_size = len(cls.get_tokenizer())
+        cls._cached_shift = base_vocab_size - cls.ORIGINAL_BASE_VOCAB_SIZE
+        return cls._cached_shift
 
     @classmethod
     def restore_opensource_token_id(cls, token_id: int) -> int:

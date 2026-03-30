@@ -1,93 +1,127 @@
-# OmniLottie-Qwen3.5-9B
+# OmniLottie Training — Qwen3.5-9B
 
-> Qwen3.5-9B based OmniLottie-style training code.
+This repository contains the **code and scripts** for training, auditing, inference, and utility workflows of a Qwen3.5-based OmniLottie implementation.
 
-本仓库保留 **OmniLottie 论文 / 官方 repo 的核心思路**：
-- 多模态条件输入
-- 自回归生成 Lottie token
-- 只对 target Lottie 段计算 loss
-- 将 Lottie token 空间追加到基础模型词表之后
+It keeps the main OmniLottie recipe:
+- multimodal conditioning
+- autoregressive generation of Lottie tokens
+- target-only loss on the Lottie segment
+- extending the base vocabulary with the Lottie token space
 
-当前实现做的主要事情只有两类：
-- 将 backbone 从原始 `Qwen2.5-VL` 路线替换为 `Qwen/Qwen3.5-9B`
-- 按新的 base vocab 大小，整体平移官方 Lottie 规则中的 token id / offset
+At the same time, it adapts the original method to **`Qwen/Qwen3.5-9B`** by shifting the official Lottie token rules to the new base vocabulary and resizing the embedding / LM head accordingly.
 
-## Current Code Path
+> Paper reference: **OmniLottie: Generating Vector Animations via Parameterized Lottie Tokens**
+> arXiv:2603.02138 (2026)
 
-当前保留并实际使用的主链路只有这一套：
+---
+
+## What is in this repository
+
+This repo is intended to store the **source code only**:
+- model code
+- data pipeline code
+- training scripts
+- audit / utility scripts
+- inference code
+- documentation
+
+It is **not** intended to version large local artifacts such as:
+- training outputs
+- logs
+- checkpoints
+- downloaded datasets
+- temporary experiment files
+
+Those artifacts are ignored via `.gitignore` before pushing.
+
+---
+
+## Repository layout
 
 ```text
-OmniLottie/
-├── train.py
-├── decoder.py
-├── data/
-│   ├── collator.py
-│   └── lottie_dataset.py
-├── lottie/
-│   └── objects/
+OmniLottie_training/
+├── OmniLottie/
+│   ├── train.py
+│   ├── decoder.py
+│   ├── inference.py
+│   ├── app.py
+│   ├── data/
+│   │   ├── collator.py
+│   │   ├── lottie_dataset.py
+│   │   ├── task_constants.py
+│   │   └── task_sampler.py
+│   └── lottie/objects/
 │       ├── lottie_tokenize.py
 │       └── lottie_rule_tokenizer.py
-├── inference.py
-├── app.py
-├── requirements.txt
-└── requirements_train.txt
+├── run_train_stages.sh
+├── run_train_all_stages.sh
+├── valid_auditing.sh
+├── gpu_watcher.sh
+└── README.md
 ```
 
-核心文件说明：
-- `train.py`：训练主入口
-- `decoder.py`：Qwen3.5 decoder，保留官方式 `resize_token_embeddings(...)` 路线
-- `data/lottie_dataset.py`：多模态条件构造与 label mask
-- `lottie/objects/lottie_tokenize.py`：原始官方规则主体
-- `lottie/objects/lottie_rule_tokenizer.py`：在官方规则基础上做 Qwen3.5 词表平移
-- `inference.py`：主推理脚本
-- `app.py`：主 demo 脚本
+Important files:
+- `OmniLottie/train.py`: training entrypoint
+- `OmniLottie/decoder.py`: Qwen3.5-based decoder with resized embeddings
+- `OmniLottie/data/lottie_dataset.py`: multimodal sample building and label masking
+- `OmniLottie/data/collator.py`: variable-length batching logic
+- `OmniLottie/data/task_sampler.py`: task-aware sampling helpers
+- `OmniLottie/lottie/objects/lottie_tokenize.py`: official Lottie rule tokenizer path
+- `OmniLottie/lottie/objects/lottie_rule_tokenizer.py`: Qwen3.5-shifted Lottie token layout
+- `OmniLottie/inference.py`: inference / benchmark / validation entrypoint
+- `run_train_stages.sh`: staged launcher used for sequential training
+- `valid_auditing.sh`: audit-only dataset validation script
+- `gpu_watcher.sh`: utility for immediately claiming newly freed non-gpu0 idle GPUs
 
-已删除的旧包装代码不再属于当前主实现。
+---
 
-## Training Design
+## Training design
 
-训练逻辑是：
-1. 文本 / 图像 / 视频通过 Qwen processor 编码成条件输入
-2. `lottie_json` 或 `sequence_text` 通过 Lottie 规则代码编码成 target token ids
-3. 输入序列为 `[condition tokens] + [bos + lottie target + eos]`
-4. condition 段 labels 置为 `-100`
-5. 只对 Lottie target 段计算自回归 CE loss
+Training follows conditional autoregressive language modeling:
 
-这对应标准的 conditional autoregressive training。
+1. text / image / video conditions are encoded into prefix tokens
+2. Lottie target data is converted into token ids with the rule-based tokenizer
+3. the final sequence is `[condition tokens] + [bos + lottie target + eos]`
+4. condition labels are masked with `-100`
+5. loss is computed only on the Lottie target segment
 
-## Qwen3.5 Migration Rule
+This preserves the target-only OmniLottie training formulation.
 
-本项目不是重新设计一套新 tokenizer 架构，而是直接沿用官方 Lottie 规则，再做 Qwen3.5 迁移：
+---
 
-- 原始官方 base vocab 视为 `151643`
-- 新 base vocab 取自当前 `Qwen3.5` config
+## Qwen3.5 migration rule
+
+This project does **not** redesign the tokenizer from scratch.
+Instead, it keeps the official Lottie rule space and shifts it to the Qwen3.5 vocabulary.
+
+Core idea:
+- original base vocab: `151643`
+- new base vocab: taken from Qwen3.5 config
 - `shift = new_base_vocab_size - 151643`
-- 所有 Lottie command token / number token / special token / parameter offset 都按这个 `shift` 整体后移
+- all Lottie command tokens / number tokens / special tokens / offsets are shifted by `shift`
 
-因此迁移重点是：
-- 扩大 `vocab_size`
-- 扩大 embedding / LM head
-- 平移官方规则中的 Lottie token id 区间
+So the migration mainly consists of:
+- expanding `vocab_size`
+- resizing embeddings and LM head
+- shifting the official Lottie token id ranges
 
-而不是引入一套额外的 hybrid head / hybrid tokenizer 框架。
+---
 
-## Default Backbone
+## Backbone
 
-默认 backbone：
+Default backbone:
 
 ```python
 Qwen/Qwen3.5-9B
 ```
 
-对应 `train.py`：
+Defined in `OmniLottie/train.py`.
 
-```python
-parser.add_argument("--model_path", type=str, default="Qwen/Qwen3.5-9B")
-```
+---
 
-## Install
+## Installation
 
-建议 Python `3.10+`。
+Recommended: Python `3.10+`.
 
 ```bash
 git clone https://github.com/wesfggfd/OmniLottie_training.git
@@ -99,95 +133,99 @@ conda activate omnilottie_qwen35
 pip install -r requirements_train.txt
 ```
 
-如需运行推理 / demo，可额外安装：
+If you also want demo / inference dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Dataset
+---
 
-`train.py` 会递归读取 `--data_path` 下所有 `*.parquet` 文件。
+## Dataset expectations
 
-支持的条件字段：
-- 文本：`desc_en` `motion_caption` `detail` `keywords_en` `short_desc` `medium_desc` `long_desc` `caption` `text` `prompt` `instruction`
-- 图像：`image` `image_path` `keyframe` `keyframe_path`
-- 视频：`video` `video_path` `rendered_video` `rendered_video_path`
+`train.py` recursively reads all `*.parquet` files under `--data_path`.
 
-支持的 target 字段：
-- 优先：`sequence_text` `lottie_sequence` `token_sequence`
-- 回退：`lottie_json` `json` `animation_json` `lottie`
+Supported condition fields include:
+- text: `desc_en`, `motion_caption`, `detail`, `keywords_en`, `short_desc`, `medium_desc`, `long_desc`, `caption`, `text`, `prompt`, `instruction`
+- image: `image`, `image_path`, `keyframe`, `keyframe_path`
+- video: `video`, `video_path`, `rendered_video`, `rendered_video_path`
 
-最小样本要求：
-- 至少一个条件输入
-- 至少一个 target 字段
+Supported target fields include:
+- preferred: `sequence_text`, `lottie_sequence`, `token_sequence`
+- fallback: `lottie_json`, `json`, `animation_json`, `lottie`
 
-默认切分方式：
-- 前 `98%` parquet 文件作为训练集
-- 后 `2%` parquet 文件作为验证集
+Minimum sample requirement:
+- at least one condition input
+- at least one target field
 
-## Train
+Default split rule:
+- first `98%` of parquet files for training
+- last `2%` for evaluation
 
-最小命令：
+---
 
-```bash
-python train.py \
-  --data_path /path/to/parquet_data \
-  --output_dir /path/to/output
-```
+## Training scripts
 
-推荐：
+### Single staged launcher
 
 ```bash
-accelerate launch train.py \
-  --model_path Qwen/Qwen3.5-9B \
-  --data_path /path/to/parquet_data \
-  --output_dir /path/to/output \
-  --max_seq_len 4096 \
-  --num_epochs 5 \
-  --per_device_batch 1 \
-  --grad_accum 8 \
-  --save_steps 2000 \
-  --eval_steps 1000 \
-  --logging_steps 10
+bash run_train_stages.sh 1
 ```
 
-主要参数：
+Current staged setup is organized as progressive task modes:
+- stage 1: `text`
+- stage 2: `image`
+- stage 3: `video`
+- stage 4: `mixed`
 
-| Argument | Default |
-|---|---:|
-| `--model_path` | `Qwen/Qwen3.5-9B` |
-| `--max_seq_len` | `4096` |
-| `--num_epochs` | `5` |
-| `--per_device_batch` | `1` |
-| `--grad_accum` | `8` |
-| `--lora_lr` | `2e-5` |
-| `--lottie_lr` | `5e-4` |
-| `--resume_from` | `None` |
+### Full pipeline launcher
 
-## Optimization
+```bash
+bash run_train_all_stages.sh
+```
 
-当前训练策略是：
-- LoRA 训练主干适配参数
-- 对扩展后 `embed_tokens.weight` / `lm_head.weight` 中新增的 Lottie token 行使用更高学习率
+---
 
-不是全参数微调，也不是自定义独立 `lottie_head` 模块。
+## GPU occupation policy
 
-## Inference
+This repo uses the following policy for non-training utility jobs such as validation / inference helpers:
+- prefer **non-gpu0** devices
+- only treat a GPU as idle when **`utilization.gpu == 0` and `memory.used == 0`**
+- once a GPU becomes idle, claim it immediately
 
-当前主推理入口：
-- `inference.py`
-- `app.py`
+Relevant scripts / code:
+- `valid_auditing.sh`
+- `gpu_watcher.sh`
+- `OmniLottie/inference.py`
+
+This is intended to avoid disturbing the main training GPU while still grabbing newly freed devices quickly.
+
+---
+
+## Inference and validation
+
+Main inference entrypoints:
+- `OmniLottie/inference.py`
+- `OmniLottie/app.py`
+
+Roundtrip validation, benchmark inference, and device-aware inference are all handled from `inference.py`.
+
+The inference path supports:
+- explicit `--gpu_id`
+- automatic non-gpu0 idle GPU selection
+- validity-aware metrics such as decode success, EOS / BOS rate, and generated token statistics
+
+---
 
 ## Notes
 
-- README 以当前仓库代码为准
-- 当前仓库是 **Qwen3.5-9B 训练版本**
-- 如果后续继续改结构，应优先保持与 `train.py` / `decoder.py` / `lottie/objects` 主链一致
+- this repo tracks the **Qwen3.5-9B training implementation**
+- the README should match the code in this repository
+- if the architecture is extended further, keep it aligned with the main path in `train.py`, `decoder.py`, and `lottie/objects`
+
+---
 
 ## Citation
-
-如果引用原始方法，请引用 OmniLottie 论文：
 
 ```bibtex
 @article{yang2026omnilottie,
@@ -197,5 +235,3 @@ accelerate launch train.py \
   year={2026}
 }
 ```
-
-
