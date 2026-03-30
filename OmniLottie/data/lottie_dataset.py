@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+TaskViewIndex = Tuple[int, str]
+
 import pyarrow.parquet as pq
 import torch
 from torch.utils.data import Dataset
@@ -106,6 +108,7 @@ class MMLottieAutoregressiveDataset(Dataset):
         self._row_offsets: List[int] = []
         self._row_group_offsets: Dict[str, List[int]] = {}
         self._sample_indices: List[int] = []
+        self._task_view_indices: List[TaskViewIndex] = []
         self._num_rows = 0
 
         if self.rows is not None and self.parquet_files:
@@ -145,9 +148,11 @@ class MMLottieAutoregressiveDataset(Dataset):
                 task_ratios=self.task_ratios,
             )
             self._sample_indices = self._mixed_sampler.build()
+            self._task_view_indices = self._build_mixed_task_view_indices(self._sample_indices)
         else:
             self._mixed_sampler = None
-        self._num_rows = len(self._sample_indices)
+            self._task_view_indices = [(sample_idx, self.task_mode) for sample_idx in self._sample_indices]
+        self._num_rows = len(self._task_view_indices)
 
     @classmethod
     def from_hf_dataset(cls, hf_dataset, **kwargs) -> "MMLottieAutoregressiveDataset":
@@ -242,8 +247,7 @@ class MMLottieAutoregressiveDataset(Dataset):
         raise RuntimeError(f"Failed to build sample after {self.max_sample_retries} attempts") from last_error
 
     def _build_item(self, idx: int) -> Dict[str, torch.Tensor]:
-        sample = self._get_sample(idx)
-        sample_task_mode = self._resolve_sample_task_mode(sample)
+        sample, sample_task_mode = self._get_sample_with_task_view(idx)
         messages = self._build_messages(sample, sample_task_mode)
         text_input = self.processor.apply_chat_template(
             messages,
@@ -318,7 +322,10 @@ class MMLottieAutoregressiveDataset(Dataset):
 
         for key in ("pixel_values", "image_grid_thw", "pixel_values_videos", "video_grid_thw"):
             if key in processor_outputs:
-                batch[key] = processor_outputs[key][0]
+                value = processor_outputs[key]
+                if value is None:
+                    continue
+                batch[key] = value
         if mm_token_type_ids is not None:
             batch["mm_token_type_ids"] = mm_token_type_ids
 
@@ -348,21 +355,60 @@ class MMLottieAutoregressiveDataset(Dataset):
     def _get_sample(self, idx: int) -> Dict[str, Any]:
         if idx < 0 or idx >= self._num_rows:
             raise IndexError(idx)
-        sample_idx = self._sample_indices[idx]
+        sample_idx, _ = self._task_view_indices[idx]
         return self._get_raw_sample(sample_idx)
+
+    def _get_sample_with_task_view(self, idx: int) -> Tuple[Dict[str, Any], str]:
+        if idx < 0 or idx >= self._num_rows:
+            raise IndexError(idx)
+        sample_idx, task_view = self._task_view_indices[idx]
+        return self._get_raw_sample(sample_idx), task_view
+
+    def _available_task_views(self, sample: Dict[str, Any]) -> List[str]:
+        sample_task = _normalize_task_label(sample.get("task_type"))
+        if sample_task in {TASK_TEXT, TASK_IMAGE, TASK_VIDEO}:
+            return [sample_task]
+
+        available: List[str] = []
+        text_value = _first_present(sample, self.field_map.text_candidates)
+        image_value = self._normalize_media_value(_first_present(sample, self.field_map.image_candidates))
+        video_value = self._normalize_media_value(_first_present(sample, self.field_map.video_candidates))
+
+        if text_value not in (None, ""):
+            available.append(TASK_TEXT)
+        if image_value is not None:
+            available.append(TASK_IMAGE)
+        if video_value is not None:
+            available.append(TASK_VIDEO)
+        return available
+
+    def _build_mixed_task_view_indices(self, sample_indices: List[int]) -> List[TaskViewIndex]:
+        task_view_indices: List[TaskViewIndex] = []
+        for sample_idx in sample_indices:
+            sample = self._get_raw_sample(sample_idx)
+            task_views = self._available_task_views(sample)
+            if not task_views:
+                continue
+            if len(task_views) == 1:
+                task_view_indices.append((sample_idx, task_views[0]))
+                continue
+            for task_view in (TASK_TEXT, TASK_IMAGE, TASK_VIDEO):
+                if task_view in task_views:
+                    task_view_indices.append((sample_idx, task_view))
+        if not task_view_indices:
+            raise RuntimeError("mixed mode produced no task-view samples")
+        return task_view_indices
 
     def _resolve_sample_task_mode(self, sample: Dict[str, Any]) -> str:
         if self.task_mode != TASK_MIXED:
             return self.task_mode
-        sample_task = _normalize_task_label(sample.get("task_type"))
-        if sample_task in {TASK_TEXT, TASK_IMAGE, TASK_VIDEO}:
-            return sample_task
-        image_value = _first_present(sample, self.field_map.image_candidates)
-        video_value = _first_present(sample, self.field_map.video_candidates)
-        if video_value is not None:
-            return TASK_VIDEO
-        if image_value is not None:
+        task_views = self._available_task_views(sample)
+        if TASK_TEXT in task_views:
+            return TASK_TEXT
+        if TASK_IMAGE in task_views:
             return TASK_IMAGE
+        if TASK_VIDEO in task_views:
+            return TASK_VIDEO
         return TASK_TEXT
 
     def _build_messages(self, sample: Dict[str, Any], task_mode: str) -> List[Dict[str, Any]]:
@@ -479,6 +525,25 @@ class MMLottieAutoregressiveDataset(Dataset):
             for key in ("pixel_values", "image_grid_thw", "pixel_values_videos", "video_grid_thw"):
                 if key in batch and batch[key] is None:
                     raise ValueError(f"Multimodal batch contains empty {key}")
+
+    def task_view_histogram(self) -> Dict[str, int]:
+        histogram: Dict[str, int] = {TASK_TEXT: 0, TASK_IMAGE: 0, TASK_VIDEO: 0}
+        for _, task_view in self._task_view_indices:
+            if task_view in histogram:
+                histogram[task_view] += 1
+        return histogram
+
+    def source_histogram(self) -> Dict[str, int]:
+        histogram: Dict[str, int] = {}
+        seen_indices = set()
+        for sample_idx, _ in self._task_view_indices:
+            if sample_idx in seen_indices:
+                continue
+            seen_indices.add(sample_idx)
+            sample = self._get_raw_sample(sample_idx)
+            source = str(sample.get("source") or "unknown")
+            histogram[source] = histogram.get(source, 0) + 1
+        return histogram
 
     def _encode_target(self, sample: Dict[str, Any]) -> List[int]:
         sequence_value = _first_present(sample, self.field_map.sequence_candidates)

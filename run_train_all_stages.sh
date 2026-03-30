@@ -9,11 +9,14 @@
 set -euo pipefail
 
 PY=/opt/liblibai-models/user-workspace2/anaconda3/envs/omnilottie_qwen35/bin/python
+ACCELERATE=/opt/liblibai-models/user-workspace2/anaconda3/envs/omnilottie_qwen35/bin/accelerate
 TRAIN=/opt/liblibai-models/user-workspace2/users/Sean_CHEN/OmniLottie_training/OmniLottie/train.py
-DATA=/opt/liblibai-models/user-workspace2/dataset/MMLottie-2M
+DATA=/opt/liblibai-models/user-workspace2/dataset/MMLottie-2M/data/Lottie_merged_70_30
 OUT_ROOT=/opt/liblibai-models/user-workspace2/users/Sean_CHEN/OmniLottie_training/outputs
 MODEL=Qwen/Qwen3.5-9B
+MIXED_RATIO_STRATEGY=${MIXED_RATIO_STRATEGY:-adaptive_stage_loss}
 GPUS=${GPUS:-"0,1,2"}  # override with: GPUS=0 bash run_train_all_stages.sh
+NPROC=${NPROC:-$(awk -F',' '{print NF}' <<< "$GPUS")}
 
 # Hyperparameters
 MAX_SEQ_LEN=4096
@@ -49,9 +52,9 @@ run_stage() {
     log "======================================================"
 
     # Build extra args
-    local extra=""
+    local extra=()
     if [ -n "${init_from}" ]; then
-        extra="--init_weights ${init_from}"
+        extra+=(--init_weights "${init_from}")
     fi
 
     # map task_mode to train.py --task_mode value
@@ -64,28 +67,38 @@ run_stage() {
         *) echo "Unknown task_mode: ${task_mode}"; exit 1 ;;
     esac
 
+    local cmd=(
+        ${ACCELERATE} launch
+        --num_processes ${NPROC}
+        --mixed_precision bf16
+        ${TRAIN}
+        --model_path "${MODEL}"
+        --data_path "${DATA}"
+        --output_dir "${out_dir}"
+        --task_mode "${tm}"
+        --max_seq_len ${MAX_SEQ_LEN}
+        --num_epochs ${num_epochs}
+        --per_device_batch ${PER_DEVICE_BATCH}
+        --grad_accum ${GRAD_ACCUM}
+        --lora_rank ${LORA_RANK}
+        --lora_alpha ${LORA_ALPHA}
+        --lora_lr ${LORA_LR}
+        --lottie_lr ${LOTTIE_LR}
+        --save_steps ${SAVE_STEPS}
+        --eval_steps ${EVAL_STEPS}
+        --logging_steps ${LOGGING_STEPS}
+        --warmup_ratio ${WARMUP_RATIO}
+        --num_workers ${NUM_WORKERS}
+        --seed 42
+    )
+    if [ "${tm}" = "mixed" ]; then
+        cmd+=(--mixed_ratio_strategy "${MIXED_RATIO_STRATEGY}" --mixed_ratio_stage_root "${OUT_ROOT}")
+    fi
+    cmd+=("${extra[@]}")
+
     CUDA_VISIBLE_DEVICES=${GPUS} \
     PYTHONPATH=/opt/liblibai-models/user-workspace2/users/Sean_CHEN/OmniLottie_training/OmniLottie:${PYTHONPATH:-} \
-    ${PY} ${TRAIN} \
-        --model_path        "${MODEL}" \
-        --data_path         "${DATA}" \
-        --output_dir        "${out_dir}" \
-        --task_mode         "${tm}" \
-        --max_seq_len       ${MAX_SEQ_LEN} \
-        --num_epochs        ${num_epochs} \
-        --per_device_batch  ${PER_DEVICE_BATCH} \
-        --grad_accum        ${GRAD_ACCUM} \
-        --lora_rank         ${LORA_RANK} \
-        --lora_alpha        ${LORA_ALPHA} \
-        --lora_lr           ${LORA_LR} \
-        --lottie_lr         ${LOTTIE_LR} \
-        --save_steps        ${SAVE_STEPS} \
-        --eval_steps        ${EVAL_STEPS} \
-        --logging_steps     ${LOGGING_STEPS} \
-        --warmup_ratio      ${WARMUP_RATIO} \
-        --num_workers       ${NUM_WORKERS} \
-        --seed              42 \
-        ${extra} \
+    "${cmd[@]}" \
         2>&1 | tee "${log_file}"
 
     log "Stage ${stage_num} complete. Best checkpoint at: ${out_dir}/best"

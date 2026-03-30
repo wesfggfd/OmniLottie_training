@@ -1,6 +1,6 @@
 # OmniLottie Training — Qwen3.5-9B
 
-This repository contains the **training, inference, validation, and utility code** for a Qwen3.5-based OmniLottie implementation.
+This repository contains the **training, inference, validation, and utility code** for a Qwen3.5-based OmniLottie migration implementation.
 
 The code keeps the core OmniLottie formulation:
 - multimodal conditioning
@@ -9,6 +9,8 @@ The code keeps the core OmniLottie formulation:
 - extending the base model vocabulary with the Lottie token space
 
 At the same time, it adapts the original method to **`Qwen/Qwen3.5-9B`** by shifting the official Lottie token rules to the new base vocabulary and resizing the embedding / LM head accordingly.
+
+This repository is therefore best understood as a **Qwen3.5 migration / reimplementation path for OmniLottie**, rather than a strict paper-backbone reproduction of the original Qwen2.5-VL setup.
 
 > Paper reference: **OmniLottie: Generating Vector Animations via Parameterized Lottie Tokens**
 > arXiv:2603.02138 (2026)
@@ -162,6 +164,11 @@ Default split rule:
 - first `98%` of parquet files for training
 - last `2%` for evaluation
 
+Recommended training corpus for this Qwen3.5 migration path:
+- `/opt/liblibai-models/user-workspace2/dataset/MMLottie-2M/data/Lottie_merged_70_30`
+- this local merged directory encodes the paper-aligned **70/30 file-level mixture** used in this project
+- local verification: `34` native `Lottie` parquet files + `15` `Lottie_SVG` parquet files
+
 ---
 
 ## Training scripts
@@ -177,6 +184,12 @@ The current staged setup is organized as progressive task modes:
 - stage 2: `image`
 - stage 3: `video`
 - stage 4: `mixed`
+
+For stage 4, this project no longer uses a fixed `1:1:1` task ratio. Instead it supports:
+- explicit ratios via `--mixed_task_ratios text=...,image=...,video=...`
+- an adaptive default strategy (`adaptive_stage_loss`) that increases sampling weight for task branches whose earlier stage still has higher validation loss
+
+This adaptive strategy is intended to rebalance optimization pressure across text / image / video rather than assuming equal difficulty.
 
 ### Full pipeline launcher
 
@@ -220,10 +233,10 @@ Main inference entrypoints:
 
 Roundtrip validation, benchmark inference, and device-aware inference are all handled from `inference.py`.
 
-The inference path supports:
-- explicit `--gpu_id`
-- automatic non-gpu0 idle GPU selection
-- validity-aware metrics such as decode success, EOS / BOS rate, and generated token statistics
+The inference path currently focuses on:
+- single-sample and benchmark inference entrypoints
+- validity-aware generation diagnostics such as decode success, EOS / BOS rate, and generated token statistics
+- benchmark-compatible artifact export for downstream evaluation
 
 ---
 

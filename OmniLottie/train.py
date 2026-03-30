@@ -5,6 +5,7 @@ import json
 import math
 import shutil
 from collections import defaultdict
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
@@ -287,6 +288,100 @@ def resolve_task_mode(task_mode: str, task_entrypoint: str | None) -> str:
     return task_entrypoint
 
 
+def parse_task_ratios(raw: str | None) -> Dict[str, float] | None:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    ratios: Dict[str, float] = {}
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            raise ValueError(f"Invalid task ratio entry: {part}. Expected key=value format.")
+        key, value = part.split("=", 1)
+        key = key.strip().lower()
+        value = float(value.strip())
+        if value < 0:
+            raise ValueError(f"Task ratio must be non-negative: {part}")
+        alias_map = {"text": TASK_TEXT, "image": TASK_IMAGE, "video": TASK_VIDEO}
+        normalized_key = alias_map.get(key, key)
+        if normalized_key not in {TASK_TEXT, TASK_IMAGE, TASK_VIDEO}:
+            raise ValueError(f"Unsupported task ratio key: {key}")
+        ratios[normalized_key] = value
+    return ratios
+
+
+def _load_best_eval_from_stage(stage_dir: Path) -> float | None:
+    log_path = stage_dir / "train_log.jsonl"
+    if not log_path.exists():
+        return None
+    best_value = None
+    for line in log_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except Exception:
+            continue
+        if event.get("event") in {"best_updated", "run_finished", "eval_step"} and event.get("eval_loss") is not None:
+            value = float(event["eval_loss"])
+            if best_value is None or value < best_value:
+                best_value = value
+        elif event.get("event") == "best_updated" and event.get("best_eval") is not None:
+            value = float(event["best_eval"])
+            if best_value is None or value < best_value:
+                best_value = value
+    return best_value
+
+
+def resolve_mixed_task_ratios(args, output_dir: Path, accelerator: Accelerator) -> Dict[str, float]:
+    explicit = parse_task_ratios(args.mixed_task_ratios)
+    if explicit is not None:
+        resolved = {TASK_TEXT: 0.0, TASK_IMAGE: 0.0, TASK_VIDEO: 0.0}
+        resolved.update(explicit)
+        if sum(resolved.values()) <= 0:
+            raise ValueError(f"Explicit mixed_task_ratios must contain a positive value: {args.mixed_task_ratios}")
+        accelerator.print(f"Using explicit mixed task ratios: {resolved}")
+        return resolved
+
+    strategy = str(args.mixed_ratio_strategy or "adaptive_stage_loss").strip().lower()
+    if strategy == "equal":
+        resolved = {TASK_TEXT: 1.0, TASK_IMAGE: 1.0, TASK_VIDEO: 1.0}
+        accelerator.print(f"Using equal mixed task ratios: {resolved}")
+        return resolved
+
+    if strategy != "adaptive_stage_loss":
+        raise ValueError(f"Unsupported mixed_ratio_strategy: {args.mixed_ratio_strategy}")
+
+    stage_root = Path(args.mixed_ratio_stage_root) if args.mixed_ratio_stage_root else output_dir.parent
+    stage_dirs = {
+        TASK_TEXT: stage_root / "stage1_text_to_lottie",
+        TASK_IMAGE: stage_root / "stage2_text_image_to_lottie",
+        TASK_VIDEO: stage_root / "stage3_video_to_lottie",
+    }
+    stage_losses = {task: _load_best_eval_from_stage(path) for task, path in stage_dirs.items()}
+    if any(value is None for value in stage_losses.values()):
+        fallback = {TASK_TEXT: 1.0, TASK_IMAGE: 1.2, TASK_VIDEO: 1.4}
+        accelerator.print(
+            "Falling back to heuristic mixed task ratios because stage eval logs were incomplete: "
+            f"{stage_losses}; fallback={fallback}"
+        )
+        return fallback
+
+    exponent = float(args.mixed_ratio_temperature)
+    floor = float(args.mixed_ratio_floor)
+    resolved = {}
+    for task, loss in stage_losses.items():
+        assert loss is not None
+        resolved[task] = floor + max(loss, 1e-6) ** exponent
+    accelerator.print(f"Using adaptive mixed task ratios from stage losses: losses={stage_losses}, ratios={resolved}")
+    return resolved
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Qwen3.5-9B OmniLottie LoRA training")
     parser.add_argument("--model_path", type=str, default="Qwen/Qwen3.5-9B")
@@ -329,6 +424,17 @@ def main() -> None:
     parser.add_argument("--max_steps_per_epoch", type=int, default=None,
                         help="Cap the number of gradient-update steps per epoch. "
                              "Useful to shorten very large datasets.")
+    parser.add_argument("--mixed_task_ratios", type=str, default=None,
+                        help="Explicit mixed task ratios, e.g. text=1,image=1.2,video=1.4")
+    parser.add_argument("--mixed_ratio_strategy", type=str, default="adaptive_stage_loss",
+                        choices=["adaptive_stage_loss", "equal"],
+                        help="How to derive mixed-stage task ratios when --mixed_task_ratios is not provided.")
+    parser.add_argument("--mixed_ratio_stage_root", type=str, default=None,
+                        help="Directory containing stage1/2/3 outputs used by adaptive mixed ratio resolution.")
+    parser.add_argument("--mixed_ratio_temperature", type=float, default=1.0,
+                        help="Exponent applied to stage losses when deriving adaptive mixed ratios.")
+    parser.add_argument("--mixed_ratio_floor", type=float, default=0.25,
+                        help="Minimum additive floor for each adaptive mixed task ratio.")
     args = parser.parse_args()
 
     resolved_task_mode = resolve_task_mode(args.task_mode, args.task_entrypoint)
@@ -338,8 +444,12 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     if accelerator.is_main_process:
         output_dir.mkdir(parents=True, exist_ok=True)
+    accelerator.wait_for_everyone()
+    mixed_task_ratios = resolve_mixed_task_ratios(args, output_dir, accelerator) if resolved_task_mode == TASK_MIXED else None
+    if accelerator.is_main_process:
         training_args = dict(vars(args))
         training_args["resolved_task_mode"] = resolved_task_mode
+        training_args["resolved_mixed_task_ratios"] = mixed_task_ratios
         write_json(output_dir / "training_args.json", training_args)
     accelerator.wait_for_everyone()
     log_path = output_dir / "train_log.jsonl"
@@ -369,7 +479,11 @@ def main() -> None:
         init_path = Path(args.init_weights)
         weight_file = init_path / "pytorch_model.bin"
         if not weight_file.exists():
-            raise FileNotFoundError(f"init_weights file not found: {weight_file}")
+            available = sorted(p.name for p in init_path.iterdir()) if init_path.exists() else []
+            raise FileNotFoundError(
+                f"init_weights file not found: {weight_file}. "
+                f"Directory exists={init_path.exists()} contents={available[:20]}"
+            )
         accelerator.print(f"Loading stage-init weights from {weight_file} ...")
         state_dict = torch.load(str(weight_file), map_location="cpu")
         incompatible = model.load_state_dict(state_dict, strict=False)
@@ -399,7 +513,7 @@ def main() -> None:
             field_map=field_map,
             max_seq_len=args.max_seq_len,
             task_mode=resolved_task_mode,
-            task_ratios=None if resolved_task_mode != "mixed" else {TASK_TEXT: 1.0, TASK_IMAGE: 1.0, TASK_VIDEO: 1.0},
+            task_ratios=mixed_task_ratios,
             max_samples=args.audit_max_samples,
         )
         valid_indices = list(audit_summary["valid_indices"])
@@ -455,7 +569,7 @@ def main() -> None:
         field_map=field_map,
         max_seq_len=args.max_seq_len,
         task_mode=resolved_task_mode,
-        task_ratios=None if resolved_task_mode != "mixed" else {TASK_TEXT: 1.0, TASK_IMAGE: 1.0, TASK_VIDEO: 1.0},
+        task_ratios=mixed_task_ratios,
         row_indices=valid_indices,
     )
     if len(train_dataset) <= 0:
@@ -463,6 +577,22 @@ def main() -> None:
     accelerator.print(
         f"Train dataset built: task_mode={resolved_task_mode} samples={len(train_dataset)} valid_indices={'yes' if valid_indices is not None else 'no'}"
     )
+    train_task_hist = train_dataset.task_view_histogram()
+    train_source_hist = train_dataset.source_histogram()
+    accelerator.print(f"Train task-view histogram: {train_task_hist}")
+    accelerator.print(f"Train source histogram: {train_source_hist}")
+    if accelerator.is_main_process:
+        append_log(
+            log_path,
+            {
+                "event": "train_dataset_summary",
+                "task_mode": resolved_task_mode,
+                "mixed_task_ratios": mixed_task_ratios,
+                "task_view_histogram": train_task_hist,
+                "source_histogram": train_source_hist,
+                "sample_count": len(train_dataset),
+            },
+        )
     eval_dataset = (
         MMLottieAutoregressiveDataset.from_parquet_files(
             eval_files,
@@ -471,11 +601,28 @@ def main() -> None:
             field_map=field_map,
             max_seq_len=args.max_seq_len,
             task_mode=resolved_task_mode,
-            task_ratios=None if resolved_task_mode != "mixed" else {TASK_TEXT: 1.0, TASK_IMAGE: 1.0, TASK_VIDEO: 1.0},
+            task_ratios=mixed_task_ratios,
         )
         if eval_files
         else None
     )
+    if eval_dataset is not None:
+        eval_task_hist = eval_dataset.task_view_histogram()
+        eval_source_hist = eval_dataset.source_histogram()
+        accelerator.print(f"Eval task-view histogram: {eval_task_hist}")
+        accelerator.print(f"Eval source histogram: {eval_source_hist}")
+        if accelerator.is_main_process:
+            append_log(
+                log_path,
+                {
+                    "event": "eval_dataset_summary",
+                    "task_mode": resolved_task_mode,
+                    "task_view_histogram": eval_task_hist,
+                    "source_histogram": eval_source_hist,
+                    "sample_count": len(eval_dataset),
+                },
+            )
+
     sample_probe = None
     probe_limit = min(64, len(train_dataset))
     for probe_idx in range(probe_limit):

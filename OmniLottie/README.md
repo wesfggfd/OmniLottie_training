@@ -246,7 +246,7 @@ python inference.py \
 - README 以当前仓库代码为准
 - 当前仓库是 **Qwen3.5-9B 训练版本**
 - 如果后续继续改结构，应优先保持与 `train.py` / `decoder.py` / `lottie/objects` 主链一致
-- 若要继续向论文/官方 repo 完整口径逼近，建议优先补充更系统的 fidelity test、更强的 validity-aware eval、以及更强的 constrained decoding
+
 
 ## Citation
 

@@ -33,10 +33,9 @@ class MixedTaskIndexSampler(Sampler[int]):
         grouped: Dict[str, List[int]] = {TASK_TEXT: [], TASK_IMAGE: [], TASK_VIDEO: []}
         for sample_idx in self.base_indices:
             sample = self.dataset._get_raw_sample(sample_idx)
-            sample_task = self.dataset._resolve_sample_task_mode(sample)
-            if sample_task not in grouped:
-                continue
-            grouped[sample_task].append(sample_idx)
+            for task_view in self.dataset._available_task_views(sample):
+                if task_view in grouped:
+                    grouped[task_view].append(sample_idx)
         if not any(grouped.values()):
             raise RuntimeError('mixed mode could not find any task-specific sample indices')
 

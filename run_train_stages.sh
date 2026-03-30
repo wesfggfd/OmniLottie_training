@@ -7,9 +7,10 @@ DATA_MERGED=/opt/liblibai-models/user-workspace2/dataset/MMLottie-2M/data/Lottie
 PYTHON=/opt/liblibai-models/user-workspace2/anaconda3/envs/omnilottie_qwen35/bin/python
 ACCELERATE=/opt/liblibai-models/user-workspace2/anaconda3/envs/omnilottie_qwen35/bin/accelerate
 
-GPUS=1,2,4,5,6
-NPROC=5
+GPUS=${GPUS:-1,2,4,5,6}
+NPROC=${NPROC:-5}
 MODEL=Qwen/Qwen3.5-9B
+MIXED_RATIO_STRATEGY=${MIXED_RATIO_STRATEGY:-adaptive_stage_loss}
 
 STAGE=${1:-1}   # pass 1/2/3/4 to start from a specific stage
 
@@ -24,9 +25,12 @@ run_stage() {
     log "======== STAGE $STAGE_NUM: $TASK_MODE ========"
     mkdir -p "$OUT_DIR"
 
-    INIT_FLAG=""
+    EXTRA_ARGS=()
     if [ -n "$INIT_WEIGHTS" ]; then
-        INIT_FLAG="--init_weights $INIT_WEIGHTS"
+        EXTRA_ARGS+=(--init_weights "$INIT_WEIGHTS")
+    fi
+    if [ "$TASK_MODE" = "mixed" ]; then
+        EXTRA_ARGS+=(--mixed_ratio_strategy "$MIXED_RATIO_STRATEGY" --mixed_ratio_stage_root "$ROOT/outputs")
     fi
 
     CUDA_VISIBLE_DEVICES=$GPUS \
@@ -57,7 +61,7 @@ run_stage() {
             --seed 42 \
             --early_stopping_patience 5 \
             --skip_audit \
-            $INIT_FLAG \
+            "${EXTRA_ARGS[@]}" \
         2>&1 | tee "${OUT_DIR}/train.log"
 
     log "Stage $STAGE_NUM complete. Best weights: $OUT_DIR/best"

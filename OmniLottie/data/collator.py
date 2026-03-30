@@ -10,10 +10,6 @@ class LottieDataCollator:
         self.pad_token_id = pad_token_id
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
-        task_types = {feature.get("task_type", "text") for feature in features}
-        if len(task_types) != 1:
-            raise ValueError(f"Mixed task types in one batch are not supported: {sorted(task_types)}")
-
         max_length = max(feature["input_ids"].shape[0] for feature in features)
         batch: Dict[str, List[torch.Tensor]] = {"input_ids": [], "attention_mask": [], "labels": []}
 
@@ -24,7 +20,7 @@ class LottieDataCollator:
             batch["labels"].append(self._pad_1d(feature["labels"], pad_length, -100))
 
         merged: Dict[str, Any] = {key: torch.stack(value, dim=0) for key, value in batch.items()}
-        merged["task_type"] = features[0].get("task_type", "text")
+        merged["task_type"] = [feature.get("task_type", "text") for feature in features]
 
         for meta_key in ("condition_length", "target_length", "truncated_condition", "truncated_target"):
             if any(meta_key in feature for feature in features):
