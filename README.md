@@ -1,12 +1,12 @@
 # OmniLottie Training — Qwen3.5-9B
 
-This repository contains the **code and scripts** for training, auditing, inference, and utility workflows of a Qwen3.5-based OmniLottie implementation.
+This repository contains the **training, inference, validation, and utility code** for a Qwen3.5-based OmniLottie implementation.
 
-It keeps the main OmniLottie recipe:
+The code keeps the core OmniLottie formulation:
 - multimodal conditioning
 - autoregressive generation of Lottie tokens
 - target-only loss on the Lottie segment
-- extending the base vocabulary with the Lottie token space
+- extending the base model vocabulary with the Lottie token space
 
 At the same time, it adapts the original method to **`Qwen/Qwen3.5-9B`** by shifting the official Lottie token rules to the new base vocabulary and resizing the embedding / LM head accordingly.
 
@@ -15,13 +15,13 @@ At the same time, it adapts the original method to **`Qwen/Qwen3.5-9B`** by shif
 
 ---
 
-## What is in this repository
+## Scope of this repository
 
-This repo is intended to store the **source code only**:
+This repository is intended to store **source code and scripts only**:
 - model code
 - data pipeline code
-- training scripts
-- audit / utility scripts
+- training launchers
+- auditing and utility scripts
 - inference code
 - documentation
 
@@ -32,7 +32,7 @@ It is **not** intended to version large local artifacts such as:
 - downloaded datasets
 - temporary experiment files
 
-Those artifacts are ignored via `.gitignore` before pushing.
+These artifacts are excluded through `.gitignore` before pushing.
 
 ---
 
@@ -172,7 +172,7 @@ Default split rule:
 bash run_train_stages.sh 1
 ```
 
-Current staged setup is organized as progressive task modes:
+The current staged setup is organized as progressive task modes:
 - stage 1: `text`
 - stage 2: `image`
 - stage 3: `video`
@@ -182,6 +182,16 @@ Current staged setup is organized as progressive task modes:
 
 ```bash
 bash run_train_all_stages.sh
+```
+
+### Direct training entrypoint
+
+```bash
+cd OmniLottie
+accelerate launch train.py \
+  --model_path Qwen/Qwen3.5-9B \
+  --data_path /path/to/parquet_data \
+  --output_dir /path/to/output
 ```
 
 ---
