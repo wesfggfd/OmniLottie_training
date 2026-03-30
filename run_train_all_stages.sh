@@ -50,6 +50,7 @@ run_stage() {
         log "  Init weights from: ${init_from}"
     fi
     log "======================================================"
+    log "  Audit: skipped during staged training (use valid_auditing.sh for standalone audit)"
 
     # Build extra args
     local extra=()
@@ -90,6 +91,7 @@ run_stage() {
         --warmup_ratio ${WARMUP_RATIO}
         --num_workers ${NUM_WORKERS}
         --seed 42
+        --skip_audit
     )
     if [ "${tm}" = "mixed" ]; then
         cmd+=(--mixed_ratio_strategy "${MIXED_RATIO_STRATEGY}" --mixed_ratio_stage_root "${OUT_ROOT}")
