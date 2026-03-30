@@ -578,9 +578,12 @@ def main() -> None:
         f"Train dataset built: task_mode={resolved_task_mode} samples={len(train_dataset)} valid_indices={'yes' if valid_indices is not None else 'no'}"
     )
     train_task_hist = train_dataset.task_view_histogram()
-    train_source_hist = train_dataset.source_histogram()
+    train_source_hist_sample_limit = 4096
+    train_source_hist = train_dataset.source_histogram(max_unique_samples=train_source_hist_sample_limit)
     accelerator.print(f"Train task-view histogram: {train_task_hist}")
-    accelerator.print(f"Train source histogram: {train_source_hist}")
+    accelerator.print(
+        f"Train source histogram (first {train_source_hist_sample_limit} unique samples): {train_source_hist}"
+    )
     if accelerator.is_main_process:
         append_log(
             log_path,
@@ -590,6 +593,7 @@ def main() -> None:
                 "mixed_task_ratios": mixed_task_ratios,
                 "task_view_histogram": train_task_hist,
                 "source_histogram": train_source_hist,
+                "source_histogram_sample_limit": train_source_hist_sample_limit,
                 "sample_count": len(train_dataset),
             },
         )
@@ -608,9 +612,12 @@ def main() -> None:
     )
     if eval_dataset is not None:
         eval_task_hist = eval_dataset.task_view_histogram()
-        eval_source_hist = eval_dataset.source_histogram()
+        eval_source_hist_sample_limit = 2048
+        eval_source_hist = eval_dataset.source_histogram(max_unique_samples=eval_source_hist_sample_limit)
         accelerator.print(f"Eval task-view histogram: {eval_task_hist}")
-        accelerator.print(f"Eval source histogram: {eval_source_hist}")
+        accelerator.print(
+            f"Eval source histogram (first {eval_source_hist_sample_limit} unique samples): {eval_source_hist}"
+        )
         if accelerator.is_main_process:
             append_log(
                 log_path,
@@ -619,6 +626,7 @@ def main() -> None:
                     "task_mode": resolved_task_mode,
                     "task_view_histogram": eval_task_hist,
                     "source_histogram": eval_source_hist,
+                    "source_histogram_sample_limit": eval_source_hist_sample_limit,
                     "sample_count": len(eval_dataset),
                 },
             )

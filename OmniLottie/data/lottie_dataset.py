@@ -533,13 +533,15 @@ class MMLottieAutoregressiveDataset(Dataset):
                 histogram[task_view] += 1
         return histogram
 
-    def source_histogram(self) -> Dict[str, int]:
+    def source_histogram(self, max_unique_samples: Optional[int] = None) -> Dict[str, int]:
         histogram: Dict[str, int] = {}
         seen_indices = set()
         for sample_idx, _ in self._task_view_indices:
             if sample_idx in seen_indices:
                 continue
             seen_indices.add(sample_idx)
+            if max_unique_samples is not None and len(seen_indices) > max_unique_samples:
+                break
             sample = self._get_raw_sample(sample_idx)
             source = str(sample.get("source") or "unknown")
             histogram[source] = histogram.get(source, 0) + 1
