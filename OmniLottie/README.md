@@ -145,8 +145,7 @@ accelerate launch train.py \
   --output_dir /path/to/output \
   --max_seq_len 4096 \
   --num_epochs 5 \
-  --per_device_batch 1 \
-  --grad_accum 8 \
+  --per_device_batch 2 \
   --save_steps 2000 \
   --eval_steps 1000 \
   --logging_steps 10
@@ -159,8 +158,7 @@ accelerate launch train.py \
 | `--model_path` | `Qwen/Qwen3.5-9B` |
 | `--max_seq_len` | `4096` |
 | `--num_epochs` | `5` |
-| `--per_device_batch` | `1` |
-| `--grad_accum` | `8` |
+| `--per_device_batch` | `2` |
 | `--lora_lr` | `2e-5` |
 | `--lottie_lr` | `5e-4` |
 | `--resume_from` | `None` |

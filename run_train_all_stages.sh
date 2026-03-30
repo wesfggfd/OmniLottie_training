@@ -15,13 +15,37 @@ DATA=/opt/liblibai-models/user-workspace2/dataset/MMLottie-2M/data/Lottie_merged
 OUT_ROOT=/opt/liblibai-models/user-workspace2/users/Sean_CHEN/OmniLottie_training/outputs
 MODEL=Qwen/Qwen3.5-9B
 MIXED_RATIO_STRATEGY=${MIXED_RATIO_STRATEGY:-adaptive_stage_loss}
-GPUS=${GPUS:-"0,1,2"}  # override with: GPUS=0 bash run_train_all_stages.sh
+select_idle_gpus() {
+    local selected=()
+    while IFS=',' read -r idx mem_used util; do
+        idx=${idx// /}
+        util=${util// /}
+        if [ "$idx" = "0" ]; then
+            continue
+        fi
+        if [ "$util" = "0" ]; then
+            selected+=("$idx")
+        fi
+    done < <(nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader,nounits)
+
+    if [ ${#selected[@]} -eq 0 ]; then
+        echo "No idle GPUs available outside GPU 0." >&2
+        exit 1
+    fi
+
+    local joined
+    joined=$(IFS=,; printf '%s' "${selected[*]}")
+    printf '%s\n' "$joined"
+}
+
+if [ -z "${GPUS:-}" ]; then
+    GPUS=$(select_idle_gpus)
+fi
 NPROC=${NPROC:-$(awk -F',' '{print NF}' <<< "$GPUS")}
 
 # Hyperparameters
 MAX_SEQ_LEN=4096
-PER_DEVICE_BATCH=1
-GRAD_ACCUM=8
+PER_DEVICE_BATCH=2
 LORA_RANK=64
 LORA_ALPHA=128
 LORA_LR=2e-5
@@ -80,7 +104,6 @@ run_stage() {
         --max_seq_len ${MAX_SEQ_LEN}
         --num_epochs ${num_epochs}
         --per_device_batch ${PER_DEVICE_BATCH}
-        --grad_accum ${GRAD_ACCUM}
         --lora_rank ${LORA_RANK}
         --lora_alpha ${LORA_ALPHA}
         --lora_lr ${LORA_LR}

@@ -7,8 +7,33 @@ DATA_MERGED=/opt/liblibai-models/user-workspace2/dataset/MMLottie-2M/data/Lottie
 PYTHON=/opt/liblibai-models/user-workspace2/anaconda3/envs/omnilottie_qwen35/bin/python
 ACCELERATE=/opt/liblibai-models/user-workspace2/anaconda3/envs/omnilottie_qwen35/bin/accelerate
 
-GPUS=${GPUS:-1,2,4,5,6}
-NPROC=${NPROC:-5}
+select_idle_gpus() {
+    local selected=()
+    while IFS=',' read -r idx mem_used util; do
+        idx=${idx// /}
+        util=${util// /}
+        if [ "$idx" = "0" ]; then
+            continue
+        fi
+        if [ "$util" = "0" ]; then
+            selected+=("$idx")
+        fi
+    done < <(nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader,nounits)
+
+    if [ ${#selected[@]} -eq 0 ]; then
+        echo "No idle GPUs available outside GPU 0." >&2
+        exit 1
+    fi
+
+    local joined
+    joined=$(IFS=,; printf '%s' "${selected[*]}")
+    printf '%s\n' "$joined"
+}
+
+if [ -z "${GPUS:-}" ]; then
+    GPUS=$(select_idle_gpus)
+fi
+NPROC=${NPROC:-$(awk -F',' '{print NF}' <<< "$GPUS")}
 MODEL=Qwen/Qwen3.5-9B
 MIXED_RATIO_STRATEGY=${MIXED_RATIO_STRATEGY:-adaptive_stage_loss}
 
@@ -46,7 +71,6 @@ run_stage() {
             --max_seq_len 4096 \
             --num_epochs 5 \
             --per_device_batch 2 \
-            --grad_accum 1 \
             --max_steps_per_epoch 10000 \
             --lora_rank 64 \
             --lora_alpha 128 \
