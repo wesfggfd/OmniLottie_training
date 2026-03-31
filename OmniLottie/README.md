@@ -33,13 +33,13 @@ OmniLottie/
 ```
 
 核心文件说明：
-- `train.py`：训练主入口
+- `train.py`：训练主入口，训练结束后会在 `output_dir/best` 和 `output_dir/final` 导出权重
 - `decoder.py`：Qwen3.5 decoder，保留官方式 `resize_token_embeddings(...)` 路线
 - `data/lottie_dataset.py`：多模态条件构造与 label mask
 - `lottie/objects/lottie_tokenize.py`：原始官方规则主体
 - `lottie/objects/lottie_rule_tokenizer.py`：在官方规则基础上做 Qwen3.5 词表平移
-- `inference.py`：主推理脚本
-- `app.py`：主 demo 脚本
+- `inference.py`：当前主推理/验证脚本，命令行入口完整可用
+- `app.py`：Gradio demo 脚本，但默认仍带占位路径，需要先改 checkpoint 路径后再启动
 
 已删除的旧包装代码不再属于当前主实现。
 
@@ -166,23 +166,61 @@ accelerate launch train.py \
 
 ## Inference
 
-当前主推理入口：
-- `inference.py`
-- `app.py`
+当前主推理入口是 `inference.py`；`app.py` 主要用于本地 Gradio demo。
+
+### CLI 推理
+
+`inference.py` 目前支持：
+- 单条文本 / 图片 / 视频推理
+- `mmlottie_bench` benchmark 推理
+- 批量文本推理
+- tokenizer roundtrip 验证
+- `--gpu_id` 指定 GPU，或自动选择空闲卡
+- `--num_candidates` best-of-N 候选选择
+
+最小示例：
+
+```bash
+python inference.py \
+  --sketch_weight /path/to/output/final \
+  --tokenizer_name Qwen/Qwen3.5-9B \
+  --single_text "a blue bird appearing, pulsing while sliding downward" \
+  --output_dir /path/to/infer_outputs
+```
+
+如果要跑 roundtrip 验证：
+
+```bash
+python inference.py \
+  --sketch_weight /path/to/output/final \
+  --tokenizer_name Qwen/Qwen3.5-9B \
+  --output_dir /path/to/output \
+  --roundtrip_validate \
+  --roundtrip_split real \
+  --max_samples 64
+```
 
 当前推理策略仍然保持 OmniLottie 的主线定义：
 - 多模态条件仍由 Qwen processor 编码
 - target 仍然是自回归生成的 Lottie token 序列
 - 生成终止仍以 Lottie `eos_token_id` 为边界
 
-但当前仓库在解码约束上仍然是 **轻量级版本**，不是完整 grammar-constrained decoding：
+当前仓库在解码约束上是轻量级版本，而不是完整 grammar-constrained decoding：
 - 首个 target token 强制为 `LOTTIE_BOS`
 - target 段内禁止再次生成 `LOTTIE_BOS`
 - 禁止生成 `PAD`
 - 将生成 token 约束在“base tokenizer 可解释区 + Lottie 扩展区”内，避免明显越界 token
 - 支持 best-of-N 候选后处理选择
 
-这意味着当前版本已经比“完全裸生成”更接近官方 token 边界设定，也比只做 BOS/PAD 边界控制更稳一些，但**仍未完全等价于论文/官方 repo 未来可能扩展的更强结构化约束解码**。
+### Demo
+
+`app.py` 可以启动 Gradio 页面，但当前代码里默认 checkpoint 路径仍是占位值：
+
+```python
+checkpoint_path = "/PATH/TO/OmniLottie"
+```
+
+因此在直接运行前，需要先把它改成实际训练导出的目录，或自行改造成从命令行参数 / 环境变量读取。
 
 ## Current Scope and Limitations
 
@@ -232,12 +270,16 @@ python inference.py \
 - `avg_generated_tokens`
 - `avg_layers_on_success`
 
+## Maintainers
+
+- wesfggfd
+- Claude
+
 ## Notes
 
 - README 以当前仓库代码为准
 - 当前仓库是 **Qwen3.5-9B 训练版本**
 - 如果后续继续改结构，应优先保持与 `train.py` / `decoder.py` / `lottie/objects` 主链一致
-
 
 ## Citation
 
