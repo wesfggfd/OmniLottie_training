@@ -107,17 +107,28 @@ pip install -r requirements.txt
 - 图像：`image` `image_path` `keyframe` `keyframe_path`
 - 视频：`video` `video_path` `rendered_video` `rendered_video_path`
 
+各任务实际使用条件的方式：
+- `text-to-lottie`：只使用文本字段
+- `text-image-to-lottie`：使用图像字段，并在存在时附带文本字段
+- `video-to-lottie`：只使用视频字段
+
 支持的 target 字段：
 - 优先：`sequence_text` `lottie_sequence` `token_sequence`
 - 回退：`lottie_json` `json` `animation_json` `lottie`
 
 最小样本要求：
-- 至少一个条件输入
+- 至少一个可用条件视图
 - 至少一个 target 字段
 
+任务组织逻辑：
+- 如果样本显式提供 `task_type`，则优先按该任务类型组织
+- 如果没有 `task_type`，则根据文本 / 图像 / 视频字段自动推断可用 task view
+- `mixed` 模式下，同一个样本如果同时支持多个 task view，会被展开成多个 `(sample, task_view)` 训练视图
+- `mixed` 模式会按 task ratio 对 text / image / video 三类视图做重采样平衡，默认比例为 `1:1:1`
+
 默认切分方式：
-- 前 `98%` parquet 文件作为训练集
-- 后 `2%` parquet 文件作为验证集
+- 先按随机种子打乱 parquet 文件顺序
+- 再取前 `98%` 作为训练集、后 `2%` 作为验证集
 
 ## Train
 
