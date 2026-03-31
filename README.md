@@ -132,12 +132,6 @@ cd OmniLottie_training/OmniLottie
 conda create -n omnilottie_qwen35 python=3.10 -y
 conda activate omnilottie_qwen35
 
-pip install -r requirements_train.txt
-```
-
-If you also want demo / inference dependencies:
-
-```bash
 pip install -r requirements.txt
 ```
 

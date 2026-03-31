@@ -29,8 +29,7 @@ OmniLottie/
 │       └── lottie_rule_tokenizer.py
 ├── inference.py
 ├── app.py
-├── requirements.txt
-└── requirements_train.txt
+└── requirements.txt
 ```
 
 核心文件说明：
@@ -96,12 +95,6 @@ cd OmniLottie_training/OmniLottie
 conda create -n omnilottie_qwen35 python=3.10 -y
 conda activate omnilottie_qwen35
 
-pip install -r requirements_train.txt
-```
-
-如需运行推理 / demo，可额外安装：
-
-```bash
 pip install -r requirements.txt
 ```
 
