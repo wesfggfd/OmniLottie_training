@@ -365,20 +365,37 @@ class MMLottieAutoregressiveDataset(Dataset):
         return self._get_raw_sample(sample_idx), task_view
 
     def _available_task_views(self, sample: Dict[str, Any]) -> List[str]:
+        detail_value = sample.get("detail")
+        image_value = self._normalize_media_value(sample.get("image"))
+        video_value = self._normalize_media_value(sample.get("video"))
+        lottie_json_value = sample.get("lottie_json")
+
+        def _has_detail() -> bool:
+            return detail_value not in (None, "")
+
+        def _has_image() -> bool:
+            return image_value is not None
+
+        def _has_video() -> bool:
+            return video_value is not None
+
+        def _has_target() -> bool:
+            return lottie_json_value is not None
+
         sample_task = _normalize_task_label(sample.get("task_type"))
-        if sample_task in {TASK_TEXT, TASK_IMAGE, TASK_VIDEO}:
-            return [sample_task]
+        if sample_task == TASK_TEXT:
+            return [TASK_TEXT] if _has_detail() and _has_target() else []
+        if sample_task == TASK_IMAGE:
+            return [TASK_IMAGE] if _has_detail() and _has_image() and _has_target() else []
+        if sample_task == TASK_VIDEO:
+            return [TASK_VIDEO] if _has_video() and _has_target() else []
 
         available: List[str] = []
-        text_value = _first_present(sample, self.field_map.text_candidates)
-        image_value = self._normalize_media_value(_first_present(sample, self.field_map.image_candidates))
-        video_value = self._normalize_media_value(_first_present(sample, self.field_map.video_candidates))
-
-        if text_value not in (None, ""):
+        if _has_detail() and _has_target():
             available.append(TASK_TEXT)
-        if image_value is not None:
+        if _has_detail() and _has_image() and _has_target():
             available.append(TASK_IMAGE)
-        if video_value is not None:
+        if _has_video() and _has_target():
             available.append(TASK_VIDEO)
         return available
 
@@ -413,18 +430,18 @@ class MMLottieAutoregressiveDataset(Dataset):
 
     def _build_messages(self, sample: Dict[str, Any], task_mode: str) -> List[Dict[str, Any]]:
         content: List[Dict[str, Any]] = []
-        image_value = self._normalize_media_value(_first_present(sample, self.field_map.image_candidates))
-        video_value = self._normalize_media_value(_first_present(sample, self.field_map.video_candidates))
-        text_value = _first_present(sample, self.field_map.text_candidates)
+        detail_value = sample.get("detail")
+        image_value = self._normalize_media_value(sample.get("image"))
+        video_value = self._normalize_media_value(sample.get("video"))
 
         if task_mode == TASK_TEXT:
-            if text_value:
-                content.append({"type": "text", "text": str(text_value)})
+            if detail_value not in (None, ""):
+                content.append({"type": "text", "text": str(detail_value)})
         elif task_mode == TASK_IMAGE:
             if image_value is not None:
                 content.append({"type": "image", "image": image_value})
-            if text_value:
-                content.append({"type": "text", "text": str(text_value)})
+            if detail_value not in (None, ""):
+                content.append({"type": "text", "text": str(detail_value)})
         elif task_mode == TASK_VIDEO:
             if video_value is not None:
                 content.append({"type": "video", "video": video_value})
@@ -548,15 +565,9 @@ class MMLottieAutoregressiveDataset(Dataset):
         return histogram
 
     def _encode_target(self, sample: Dict[str, Any]) -> List[int]:
-        sequence_value = _first_present(sample, self.field_map.sequence_candidates)
-        if sequence_value:
-            token_ids = self.lottie_tokenizer.encode_sequence_text(str(sequence_value), max_length=self.max_seq_len)
-            return self._validate_token_ids(token_ids)
-
-        json_value = _first_present(sample, self.field_map.json_candidates)
+        json_value = sample.get("lottie_json")
         if json_value is None:
-            raise KeyError(f"No Lottie target field found in sample keys: {sorted(sample.keys())}")
-
+            raise KeyError(f"Expected lottie_json target; sample keys: {sorted(sample.keys())}")
         if isinstance(json_value, str):
             try:
                 parsed = json.loads(json_value)
@@ -564,7 +575,6 @@ class MMLottieAutoregressiveDataset(Dataset):
                 parsed = json_value
         else:
             parsed = json_value
-
         token_ids = self.lottie_tokenizer.encode_lottie_json(parsed, max_length=self.max_seq_len)
         return self._validate_token_ids(token_ids)
 

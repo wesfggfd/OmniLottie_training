@@ -102,29 +102,25 @@ pip install -r requirements.txt
 
 `train.py` 会递归读取 `--data_path` 下所有 `*.parquet` 文件。
 
-支持的条件字段：
-- 文本：`desc_en` `motion_caption` `detail` `keywords_en` `short_desc` `medium_desc` `long_desc` `caption` `text` `prompt` `instruction`
-- 图像：`image` `image_path` `keyframe` `keyframe_path`
-- 视频：`video` `video_path` `rendered_video` `rendered_video_path`
+训练数据当前按固定字段约定组织：
+- `text-to-lottie`：条件输入固定为 `detail`，target 固定为 `lottie_json`
+- `text-image-to-lottie`：条件输入固定为 `detail + image`，target 固定为 `lottie_json`
+- `video-to-lottie`：条件输入固定为 `video`，target 固定为 `lottie_json`
 
-各任务实际使用条件的方式：
-- `text-to-lottie`：只使用文本字段
-- `text-image-to-lottie`：使用图像字段，并在存在时附带文本字段
-- `video-to-lottie`：只使用视频字段
-
-支持的 target 字段：
-- 优先：`sequence_text` `lottie_sequence` `token_sequence`
-- 回退：`lottie_json` `json` `animation_json` `lottie`
-
-最小样本要求：
-- 至少一个可用条件视图
-- 至少一个 target 字段
+`mixed` 模式保持综合三任务训练，但每个 task view 仍按上述固定字段要求构造：
+- text 视图要求同时存在 `detail` 和 `lottie_json`
+- image 视图要求同时存在 `detail`、`image` 和 `lottie_json`
+- video 视图要求同时存在 `video` 和 `lottie_json`
 
 任务组织逻辑：
-- 如果样本显式提供 `task_type`，则优先按该任务类型组织
-- 如果没有 `task_type`，则根据文本 / 图像 / 视频字段自动推断可用 task view
-- `mixed` 模式下，同一个样本如果同时支持多个 task view，会被展开成多个 `(sample, task_view)` 训练视图
+- 如果样本显式提供 `task_type`，则优先按该任务类型尝试构造样本
+- 如果没有 `task_type`，则根据上述固定字段规则自动推断可用 task view
+- `mixed` 模式下，同一个样本如果同时满足多个 task view 的字段要求，会被展开成多个 `(sample, task_view)` 训练视图
 - `mixed` 模式会按 task ratio 对 text / image / video 三类视图做重采样平衡，默认比例为 `1:1:1`
+
+最小样本要求：
+- 至少满足一个任务视图的固定字段要求
+- 必须存在 `lottie_json`
 
 默认切分方式：
 - 先按随机种子打乱 parquet 文件顺序
